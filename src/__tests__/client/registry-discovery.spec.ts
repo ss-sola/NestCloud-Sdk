@@ -134,7 +134,7 @@ describe('服务注册与发现', () => {
       );
       expect(axios.post).toHaveBeenCalledWith(
         `${registryUrl}/api/registry/register`,
-        expect.anything(),
+        expect.objectContaining({ heartbeatInterval: 1_000 }),
         auth,
       );
       expect(axios.get).toHaveBeenCalledWith(`${registryUrl}/api/registry/all`, auth);

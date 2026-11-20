@@ -21,6 +21,7 @@ import { ControlPlaneRequestUtil } from './control-plane-request.util';
 export class RegistryClientService implements AfterApplicationBootstrap, OnModuleDestroy {
   private readonly logger = new Logger(RegistryClientService.name);
   private readonly requestOptions: AxiosRequestConfig;
+  private readonly heartbeatInterval: number;
   private instanceId: string;
   private heartbeatTimer?: NodeJS.Timeout;
   private syncTimer?: NodeJS.Timeout;
@@ -36,6 +37,7 @@ export class RegistryClientService implements AfterApplicationBootstrap, OnModul
     private readonly options: RegistryClientOption,
   ) {
     this.instanceId = `${options.serviceName}-${options.serviceHost}-${options.servicePort}`;
+    this.heartbeatInterval = Number(options.heartbeatInterval ?? HEARTBEAT_INTERVAL);
     this.requestOptions = {
       timeout: DEFAULT_REMOTE_TIMEOUT,
       ...ControlPlaneRequestUtil.authOptions(options.controlPlaneToken),
@@ -107,6 +109,7 @@ export class RegistryClientService implements AfterApplicationBootstrap, OnModul
         host: this.options.serviceHost,
         port: this.options.servicePort,
         baseUrl: this.options.serviceBaseUrl,
+        heartbeatInterval: this.heartbeatInterval,
         metadata: this.options.metadata,
       },
       this.requestOptions,
@@ -163,8 +166,7 @@ export class RegistryClientService implements AfterApplicationBootstrap, OnModul
       return;
     }
 
-    const interval = this.options.heartbeatInterval ?? HEARTBEAT_INTERVAL;
-    this.heartbeatTimer = setInterval(() => this.heartbeat(), interval);
+    this.heartbeatTimer = setInterval(() => this.heartbeat(), this.heartbeatInterval);
   }
 
   private stopHeartbeat() {
