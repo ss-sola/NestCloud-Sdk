@@ -1,9 +1,19 @@
 // client/registry-client.service.ts
-import { Inject, Injectable, Logger, OnModuleDestroy } from '@nestjs/common';
+import {
+  HttpStatus,
+  Inject,
+  Injectable,
+  Logger,
+  OnApplicationBootstrap,
+  OnModuleDestroy,
+} from '@nestjs/common';
 import axios from 'axios';
+import { z } from 'zod';
 import { RegistryClientOption, ServiceInstance } from './registry-client.options';
 import {
+  DISCOVERY_CACHE_MAX_AGE_INTERVALS,
   HEARTBEAT_INTERVAL,
+  MAX_SYNC_INTERVAL,
   REGISTER_MAX_RETRIES,
   REGISTER_RETRY_INTERVAL,
   REGISTRY_CLIENT_OPTIONS,
@@ -15,26 +25,68 @@ import { isSameService } from '@/util/common.util';
 import { ServiceAddressUtil } from '@/util/service-address.util';
 import { enableAutoRegister } from './enable-registry-client.decorator';
 import { getOptions } from '@/config-center/options';
+import { DEFAULT_REMOTE_TIMEOUT } from '@/constants/http.constants';
+import { ProjectException } from '@/exception/global.exception';
+
+const serviceMapSchema = z.record(
+  z.string(),
+  z.array(
+    z.looseObject({
+      id: z.string().min(1),
+      name: z.string().min(1),
+      host: z.string().min(1),
+      port: z.int().min(1).max(65_535),
+      lastHeartbeat: z.number(),
+      baseUrl: z
+        .string()
+        .nullish()
+        .transform((value) => value ?? undefined),
+      group: z
+        .string()
+        .nullish()
+        .transform((value) => value ?? undefined),
+      metadata: z
+        .record(z.string(), z.unknown())
+        .nullish()
+        .transform((value) => value ?? undefined),
+    }),
+  ),
+);
+const discoveryResponseSchema = z.union([
+  z
+    .object({ code: z.literal(200).optional(), data: serviceMapSchema })
+    .transform(({ data }) => data),
+  serviceMapSchema,
+]);
 
 @Injectable()
-export class RegistryClientService implements AfterApplicationBootstrap, OnModuleDestroy {
+export class RegistryClientService
+  implements OnApplicationBootstrap, AfterApplicationBootstrap, OnModuleDestroy
+{
   private readonly logger = new Logger(RegistryClientService.name);
-  private instanceId: string;
+  private readonly instanceId: string;
+  private readonly syncInterval: number;
   private heartbeatTimer?: NodeJS.Timeout;
   private syncTimer?: NodeJS.Timeout;
   private isRegistering = false;
-  private registrationStarted = false;
+  private registered = false;
+  private isSyncing = false;
   private roundRobinCounter = new Map<string, number>(); // 为每个服务维护一个轮询计数
-  private cache = new Map<string, ServiceInstance[]>(); // 本地缓存
+  private cache?: { services: Map<string, ServiceInstance[]>; expiresAt: number };
 
   constructor(
     @Inject(REGISTRY_CLIENT_OPTIONS)
     private readonly options: RegistryClientOption,
   ) {
     this.instanceId = `${options.serviceName}-${options.serviceHost}-${options.servicePort}`;
+    const syncInterval = Number(options.syncInterval ?? SYNC_INTERVAL);
+    this.syncInterval =
+      Number.isInteger(syncInterval) && syncInterval >= 1 && syncInterval <= MAX_SYNC_INTERVAL
+        ? syncInterval
+        : SYNC_INTERVAL;
   }
 
-  async afterApplicationBootstrap() {
+  async onApplicationBootstrap() {
     if (!enableAutoRegister(getOptions().AppModule)) return;
     // 如果注册中心地址是自己，则不注册
     const currentUrl = ServiceAddressUtil.httpOrigin(
@@ -43,20 +95,22 @@ export class RegistryClientService implements AfterApplicationBootstrap, OnModul
     );
     if (isSameService(currentUrl, this.options.registryUrl)) return;
 
-    this.registrationStarted = true;
-    // 注册自己
+    // Nest 在监听端口前等待首次注册完成。注册失败由 SDK 启动入口退出进程。
     await this.registerWithRetry();
+  }
+
+  async afterApplicationBootstrap() {
+    if (!this.registered) return;
     await this.syncServices(); // 启动时先拉一次
 
     // 定时同步服务列表
-    const syncInterval = this.options.syncInterval ?? SYNC_INTERVAL;
-    this.syncTimer = setInterval(() => this.syncServices(), syncInterval);
+    this.syncTimer = setInterval(() => this.syncServices(), this.syncInterval);
   }
 
   async onModuleDestroy() {
-    if (this.registrationStarted) await this.unregister();
     if (this.heartbeatTimer) clearInterval(this.heartbeatTimer);
     if (this.syncTimer) clearInterval(this.syncTimer);
+    if (this.registered) await this.unregister();
   }
 
   // === 注册中心交互 ===
@@ -82,10 +136,10 @@ export class RegistryClientService implements AfterApplicationBootstrap, OnModul
           );
 
           if (attempt >= REGISTER_MAX_RETRIES) {
-            this.logger.error(
+            throw new Error(
               `Register aborted after ${REGISTER_MAX_RETRIES} attempts: ${this.instanceId}`,
+              { cause: err },
             );
-            return;
           }
 
           await delay(REGISTER_RETRY_INTERVAL);
@@ -97,14 +151,19 @@ export class RegistryClientService implements AfterApplicationBootstrap, OnModul
   }
 
   private async register() {
-    await axios.post(`${this.options.registryUrl}/api/registry/register`, {
-      id: this.instanceId,
-      name: this.options.serviceName,
-      host: this.options.serviceHost,
-      port: this.options.servicePort,
-      baseUrl: this.options.serviceBaseUrl,
-      metadata: this.options.metadata,
-    });
+    await axios.post(
+      `${this.options.registryUrl}/api/registry/register`,
+      {
+        id: this.instanceId,
+        name: this.options.serviceName,
+        host: this.options.serviceHost,
+        port: this.options.servicePort,
+        baseUrl: this.options.serviceBaseUrl,
+        metadata: this.options.metadata,
+      },
+      { signal: AbortSignal.timeout(DEFAULT_REMOTE_TIMEOUT) },
+    );
+    this.registered = true;
     this.logger.log(`Registered as ${this.instanceId}`);
 
     this.startHeartbeat();
@@ -161,35 +220,54 @@ export class RegistryClientService implements AfterApplicationBootstrap, OnModul
   }
 
   private async syncServices() {
-    try {
-      const res = await axios.get(`${this.options.registryUrl}/api/registry/all`);
-      const serviceMap = unwrapResponsePayload<Record<string, ServiceInstance[]>>(res.data);
+    if (this.isSyncing) return;
+    this.isSyncing = true;
 
-      const newCache = new Map<string, ServiceInstance[]>();
-      for (const key in serviceMap) {
-        newCache.set(key, serviceMap[key]);
+    try {
+      const res = await axios.get<unknown>(`${this.options.registryUrl}/api/registry/all`, {
+        signal: AbortSignal.timeout(DEFAULT_REMOTE_TIMEOUT),
+      });
+      const snapshot = discoveryResponseSchema.safeParse(res.data);
+      if (!snapshot.success) {
+        throw new Error('Invalid registry service list');
       }
 
-      this.cache = newCache; // 只有成功时才替换
-      this.logger.debug(`服务实例已同步到本地缓存: ${JSON.stringify(serviceMap)}`);
-    } catch (err: any) {
+      this.cache = {
+        services: new Map(Object.entries(snapshot.data)),
+        expiresAt: performance.now() + this.syncInterval * DISCOVERY_CACHE_MAX_AGE_INTERVALS,
+      };
+      this.logger.debug(`服务实例已同步到本地缓存: ${JSON.stringify(snapshot.data)}`);
+    } catch (err: unknown) {
       this.logger.error(
         `Sync services failed: ${err instanceof Error ? err.message : String(err)}`,
         err instanceof Error ? err.stack : undefined,
       );
+    } finally {
+      this.isSyncing = false;
     }
   }
 
   // === 本地服务发现 ===
-  getInstances(serviceName: string): ServiceInstance[] {
-    return this.cache.get(serviceName) ?? [];
+  getInstances(serviceName: string, { requireFresh = false } = {}): ServiceInstance[] {
+    const services = this.getFreshServices();
+    if (!services && requireFresh) {
+      throw new ProjectException('服务发现暂不可用', HttpStatus.SERVICE_UNAVAILABLE);
+    }
+    return services?.get(serviceName) ?? [];
+  }
+
+  private getFreshServices() {
+    if (this.cache && performance.now() >= this.cache.expiresAt) {
+      this.cache = undefined;
+    }
+    return this.cache?.services;
   }
 
   listServices(): Array<{
     serviceName: string;
     instances: ServiceInstance[];
   }> {
-    return [...this.cache.entries()].map(([serviceName, instances]) => ({
+    return [...(this.getFreshServices()?.entries() ?? [])].map(([serviceName, instances]) => ({
       serviceName,
       instances: [...instances],
     }));
