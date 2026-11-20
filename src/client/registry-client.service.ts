@@ -1,28 +1,32 @@
 // client/registry-client.service.ts
 import { Inject, Injectable, Logger, OnModuleDestroy } from '@nestjs/common';
-import axios from 'axios';
+import axios, { type AxiosRequestConfig } from 'axios';
 import { RegistryClientOption, ServiceInstance } from './registry-client.options';
 import {
   HEARTBEAT_INTERVAL,
-  REGISTER_MAX_RETRIES,
   REGISTER_RETRY_INTERVAL,
   REGISTRY_CLIENT_OPTIONS,
   SYNC_INTERVAL,
 } from './registry-client.constants';
 import { AfterApplicationBootstrap } from '@/ext/after-application-bootstrap.interface';
+import { DEFAULT_REMOTE_TIMEOUT } from '@/constants/http.constants';
 
 import { isSameService } from '@/util/common.util';
 import { ServiceAddressUtil } from '@/util/service-address.util';
 import { enableAutoRegister } from './enable-registry-client.decorator';
 import { getOptions } from '@/config-center/options';
+import { ControlPlaneRequestUtil } from './control-plane-request.util';
 
 @Injectable()
 export class RegistryClientService implements AfterApplicationBootstrap, OnModuleDestroy {
   private readonly logger = new Logger(RegistryClientService.name);
+  private readonly requestOptions: AxiosRequestConfig;
   private instanceId: string;
   private heartbeatTimer?: NodeJS.Timeout;
   private syncTimer?: NodeJS.Timeout;
-  private isRegistering = false;
+  private registrationAttempt?: Promise<void>;
+  private registrationRetryTimer?: NodeJS.Timeout;
+  private isHeartbeating = false;
   private registrationStarted = false;
   private roundRobinCounter = new Map<string, number>(); // 为每个服务维护一个轮询计数
   private cache = new Map<string, ServiceInstance[]>(); // 本地缓存
@@ -32,6 +36,10 @@ export class RegistryClientService implements AfterApplicationBootstrap, OnModul
     private readonly options: RegistryClientOption,
   ) {
     this.instanceId = `${options.serviceName}-${options.serviceHost}-${options.servicePort}`;
+    this.requestOptions = {
+      timeout: DEFAULT_REMOTE_TIMEOUT,
+      ...ControlPlaneRequestUtil.authOptions(options.controlPlaneToken),
+    };
   }
 
   async afterApplicationBootstrap() {
@@ -46,7 +54,9 @@ export class RegistryClientService implements AfterApplicationBootstrap, OnModul
     this.registrationStarted = true;
     // 注册自己
     await this.registerWithRetry();
+    if (!this.registrationStarted) return;
     await this.syncServices(); // 启动时先拉一次
+    if (!this.registrationStarted) return;
 
     // 定时同步服务列表
     const syncInterval = this.options.syncInterval ?? SYNC_INTERVAL;
@@ -54,65 +64,65 @@ export class RegistryClientService implements AfterApplicationBootstrap, OnModul
   }
 
   async onModuleDestroy() {
-    if (this.registrationStarted) await this.unregister();
-    if (this.heartbeatTimer) clearInterval(this.heartbeatTimer);
+    if (!this.registrationStarted) return;
+    this.registrationStarted = false;
+    if (this.registrationRetryTimer) clearTimeout(this.registrationRetryTimer);
+    this.stopHeartbeat();
     if (this.syncTimer) clearInterval(this.syncTimer);
+    // 请求可能已到达注册中心，等待完成后下线，避免退出时留下活动实例。
+    await this.registrationAttempt;
+    await this.unregister();
   }
 
   // === 注册中心交互 ===
-  private async registerWithRetry() {
-    if (this.isRegistering) {
-      return;
+  private registerWithRetry(): Promise<void> | undefined {
+    if (!this.registrationStarted || this.registrationAttempt || this.registrationRetryTimer) {
+      return this.registrationAttempt;
     }
 
-    this.isRegistering = true;
-
-    try {
-      for (let attempt = 1; attempt <= REGISTER_MAX_RETRIES; attempt += 1) {
-        try {
-          await this.register();
-          return;
-        } catch (err: unknown) {
-          const message = err instanceof Error ? err.message : String(err);
-          const stack = err instanceof Error ? err.stack : undefined;
-
-          this.logger.error(
-            `Register failed (${attempt}/${REGISTER_MAX_RETRIES}): ${message}`,
-            stack,
-          );
-
-          if (attempt >= REGISTER_MAX_RETRIES) {
-            this.logger.error(
-              `Register aborted after ${REGISTER_MAX_RETRIES} attempts: ${this.instanceId}`,
-            );
-            return;
-          }
-
-          await delay(REGISTER_RETRY_INTERVAL);
-        }
-      }
-    } finally {
-      this.isRegistering = false;
-    }
+    this.registrationAttempt = this.register()
+      .catch((error: unknown) => {
+        if (!this.registrationStarted) return;
+        const message = error instanceof Error ? error.message : String(error);
+        this.logger.warn(
+          `Register failed for ${this.instanceId}, retrying in ${REGISTER_RETRY_INTERVAL} ms: ${message}`,
+        );
+        this.registrationRetryTimer = setTimeout(() => {
+          this.registrationRetryTimer = undefined;
+          void this.registerWithRetry();
+        }, REGISTER_RETRY_INTERVAL);
+      })
+      .finally(() => {
+        this.registrationAttempt = undefined;
+      });
+    return this.registrationAttempt;
   }
 
   private async register() {
-    await axios.post(`${this.options.registryUrl}/api/registry/register`, {
-      id: this.instanceId,
-      name: this.options.serviceName,
-      host: this.options.serviceHost,
-      port: this.options.servicePort,
-      baseUrl: this.options.serviceBaseUrl,
-      metadata: this.options.metadata,
-    });
+    await axios.post(
+      `${this.options.registryUrl}/api/registry/register`,
+      {
+        id: this.instanceId,
+        name: this.options.serviceName,
+        host: this.options.serviceHost,
+        port: this.options.servicePort,
+        baseUrl: this.options.serviceBaseUrl,
+        metadata: this.options.metadata,
+      },
+      this.requestOptions,
+    );
     this.logger.log(`Registered as ${this.instanceId}`);
 
-    this.startHeartbeat();
+    if (this.registrationStarted) this.startHeartbeat();
   }
 
   private async unregister() {
     try {
-      await axios.post(`${this.options.registryUrl}/api/registry/unregister/${this.instanceId}`);
+      await axios.post(
+        `${this.options.registryUrl}/api/registry/unregister/${this.instanceId}`,
+        undefined,
+        this.requestOptions,
+      );
       this.logger.log(`Unregistered ${this.instanceId}`);
     } catch (err: any) {
       this.logger.error(
@@ -123,9 +133,13 @@ export class RegistryClientService implements AfterApplicationBootstrap, OnModul
   }
 
   private async heartbeat() {
+    if (!this.registrationStarted || this.isHeartbeating) return;
+    this.isHeartbeating = true;
     try {
       const res = await axios.post<{ success: boolean }>(
         `${this.options.registryUrl}/api/registry/heartbeat/${this.instanceId}`,
+        undefined,
+        this.requestOptions,
       );
       const heartbeatResult = unwrapResponsePayload<{ success: boolean }>(res.data);
 
@@ -139,6 +153,8 @@ export class RegistryClientService implements AfterApplicationBootstrap, OnModul
         `Heartbeat failed: ${err instanceof Error ? err.message : String(err)}`,
         err instanceof Error ? err.stack : undefined,
       );
+    } finally {
+      this.isHeartbeating = false;
     }
   }
 
@@ -162,7 +178,10 @@ export class RegistryClientService implements AfterApplicationBootstrap, OnModul
 
   private async syncServices() {
     try {
-      const res = await axios.get(`${this.options.registryUrl}/api/registry/all`);
+      const res = await axios.get(
+        `${this.options.registryUrl}/api/registry/all`,
+        this.requestOptions,
+      );
       const serviceMap = unwrapResponsePayload<Record<string, ServiceInstance[]>>(res.data);
 
       const newCache = new Map<string, ServiceInstance[]>();
@@ -215,10 +234,6 @@ export class RegistryClientService implements AfterApplicationBootstrap, OnModul
 
     return instances[0];
   }
-}
-
-function delay(timeout: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, timeout));
 }
 
 function unwrapResponsePayload<T>(payload: any): T {

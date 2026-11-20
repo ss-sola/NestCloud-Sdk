@@ -5,6 +5,7 @@ import { validateSync } from 'class-validator';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { EnableAutoRegister } from '../../client/enable-registry-client.decorator';
 import { RegistryClientService } from '../../client/registry-client.service';
+import { REGISTER_RETRY_INTERVAL } from '../../client/registry-client.constants';
 import type { ServiceInstance } from '../../client/registry-client.options';
 import { setOptions } from '../../config-center/options';
 import { ConfigKeys } from '../../config/keys';
@@ -100,6 +101,86 @@ describe('服务注册与发现', () => {
     expect(axios.request).toHaveBeenCalledWith(
       expect.objectContaining({ url: 'http://10.1.2.3:8000/file/detail?id=7' }),
     );
+  });
+
+  it('首次注册失败超过原有上限后仍按固定间隔重试，恢复后发送带鉴权的心跳', async () => {
+    vi.useFakeTimers();
+    const token = 'control-plane-test-token';
+    const times: number[] = [];
+    vi.mocked(axios.post).mockImplementation(async (url) => {
+      if (url.endsWith('/register') && times.push(Date.now()) <= 6) throw new Error('不可用');
+      return { data: { success: true } };
+    });
+    const registryUrl = 'http://registry.internal:3100';
+    const client = new RegistryClientService({
+      registryUrl,
+      serviceName: 'files',
+      serviceHost: '10.0.0.7',
+      servicePort: 3300,
+      controlPlaneToken: token,
+      heartbeatInterval: 1_000,
+    });
+    const auth = expect.objectContaining({
+      headers: { Authorization: `Bearer ${token}` },
+      maxRedirects: 0,
+    });
+    try {
+      const start = client.afterApplicationBootstrap();
+      await vi.advanceTimersByTimeAsync(REGISTER_RETRY_INTERVAL * 6);
+      await start;
+      expect(times).toHaveLength(7);
+      expect(times.slice(1).map((time, index) => time - times[index])).toEqual(
+        Array(6).fill(REGISTER_RETRY_INTERVAL),
+      );
+      expect(axios.post).toHaveBeenCalledWith(
+        `${registryUrl}/api/registry/register`,
+        expect.anything(),
+        auth,
+      );
+      expect(axios.get).toHaveBeenCalledWith(`${registryUrl}/api/registry/all`, auth);
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(axios.post).toHaveBeenCalledWith(
+        `${registryUrl}/api/registry/heartbeat/files-10.0.0.7-3300`,
+        undefined,
+        auth,
+      );
+    } finally {
+      await client.onModuleDestroy();
+      vi.useRealTimers();
+    }
+    expect(axios.post).toHaveBeenCalledWith(
+      `${registryUrl}/api/registry/unregister/files-10.0.0.7-3300`,
+      undefined,
+      auth,
+    );
+  });
+
+  it('心跳发现实例丢失后按相同间隔重试，关闭时取消重试', async () => {
+    vi.useFakeTimers();
+    const times: number[] = [];
+    vi.mocked(axios.post).mockImplementation(async (url) => {
+      if (url.endsWith('/register') && times.push(Date.now()) > 1) throw new Error('不可用');
+      return { data: { success: !url.includes('/heartbeat/') } };
+    });
+    const client = new RegistryClientService({
+      registryUrl: 'http://registry.internal:3100',
+      serviceName: 'files',
+      serviceHost: '10.0.0.7',
+      servicePort: 3300,
+      heartbeatInterval: 1_000,
+    });
+    try {
+      await client.afterApplicationBootstrap();
+      await vi.advanceTimersByTimeAsync(1_000 + REGISTER_RETRY_INTERVAL);
+      expect(times).toHaveLength(3);
+      expect(times[2] - times[1]).toBe(REGISTER_RETRY_INTERVAL);
+      await client.onModuleDestroy();
+      await vi.advanceTimersByTimeAsync(REGISTER_RETRY_INTERVAL * 2);
+      expect(times).toHaveLength(3);
+    } finally {
+      await client.onModuleDestroy();
+      vi.useRealTimers();
+    }
   });
 
   it('服务启动配置接受 HTTPS 前缀并拒绝将查询参数配置为基础路径', () => {
