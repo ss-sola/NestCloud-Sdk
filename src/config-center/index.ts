@@ -8,6 +8,7 @@ import { getOptions } from './options';
 import { ProjectException } from '@/exception/global.exception';
 import { enableConfigCenter } from './enable-config-center.decorator';
 import { SYNC_CONFIG_INTERVAL } from '@/client/registry-client.constants';
+import { ControlPlaneRequestUtil } from '@/client/control-plane-request.util';
 import { isSameService } from '@/util/common.util';
 import { ConfigKeys } from '@/config/keys';
 import { DEFAULT_REMOTE_TIMEOUT } from '@/constants/http.constants';
@@ -91,8 +92,16 @@ export function getConfig<T>(
   required = true,
   valueType?: ConfigValueType,
 ): T {
+  // 凭证及其请求目标取自部署配置，避免远程配置将凭证发送到其他地址。
+  const deploymentOnly =
+    key === ConfigKeys.ControlPlaneToken ||
+    (key === ConfigKeys.RegistryUrl && Boolean(getDeploymentValue(ConfigKeys.ControlPlaneToken)));
   const configuredValue = getValueByPath(configCenter.mainConfig, key);
-  const value = configuredValue === undefined ? process.env[key] : configuredValue;
+  const value = deploymentOnly
+    ? getDeploymentValue(key)
+    : configuredValue === undefined
+      ? process.env[key]
+      : configuredValue;
   if (value === undefined && defaultValue === undefined && required) {
     throw new ProjectException(`Config key not found: ${key}`);
   }
@@ -105,12 +114,25 @@ export function getConfig<T>(
   ) as T;
 }
 
+function getDeploymentValue(key: string): unknown {
+  return process.env[key] ?? getValueByPath(configCenter.devConfig, key);
+}
+
 export function validateConfig<T extends object>(
   configClass: ConfigClass<T>,
   candidate = configCenter.mainConfig,
 ) {
-  const instance = ConfigSnapshotUtil.validate(configClass, candidate);
-  configCenter.mainConfig = ConfigSnapshotUtil.merge(candidate, instance);
+  const token = getConfig<string | undefined>(ConfigKeys.ControlPlaneToken, undefined, false);
+  const snapshot: Record<string, any> = { ...candidate, [ConfigKeys.ControlPlaneToken]: token };
+  if (token) {
+    snapshot[ConfigKeys.RegistryUrl] = getConfig<string | undefined>(
+      ConfigKeys.RegistryUrl,
+      undefined,
+      false,
+    );
+  }
+  const instance = ConfigSnapshotUtil.validate(configClass, snapshot);
+  configCenter.mainConfig = ConfigSnapshotUtil.merge(snapshot, instance);
   return instance;
 }
 
@@ -164,8 +186,10 @@ async function syncRemoteConfig(serviceName: string) {
     return;
   }
   const localOverrides = configCenter.devConfig;
+  const token = getConfig<string | undefined>(ConfigKeys.ControlPlaneToken, undefined, false);
   const response = await axios.get(`${configUrl}/api/config-files/client/pull`, {
     timeout: DEFAULT_REMOTE_TIMEOUT,
+    ...ControlPlaneRequestUtil.authOptions(token),
     params: {
       serviceName,
       names: names || undefined,
@@ -177,7 +201,10 @@ async function syncRemoteConfig(serviceName: string) {
     throw new ProjectException('Config center response is missing a valid mergedConfig object');
   }
   if (localOverrides !== configCenter.devConfig) return;
-  const candidate = ConfigSnapshotUtil.merge(payload.mergedConfig, localOverrides);
+  const remoteConfig = { ...payload.mergedConfig };
+  delete remoteConfig[ConfigKeys.ControlPlaneToken];
+  if (token) delete remoteConfig[ConfigKeys.RegistryUrl];
+  const candidate = ConfigSnapshotUtil.merge(remoteConfig, localOverrides);
   const configClass = getOptions().validateConfig;
   if (configClass) {
     validateConfig(configClass, candidate);

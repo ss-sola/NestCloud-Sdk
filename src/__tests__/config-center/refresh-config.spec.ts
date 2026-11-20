@@ -49,6 +49,7 @@ describe('配置启动与热刷新', () => {
   afterEach(() => {
     vi.clearAllTimers();
     vi.useRealTimers();
+    vi.unstubAllEnvs();
   });
 
   it.each([
@@ -129,5 +130,31 @@ describe('配置启动与热刷新', () => {
     completeRefresh(response({ BullBoardEnabled: true }));
     await vi.advanceTimersByTimeAsync(0);
     expect(getConfig('BullBoardEnabled')).toBe(true);
+  });
+
+  it('仅用部署 Token 和部署地址发送请求，远程配置不能覆盖它们', async () => {
+    const url = 'https://registry-local.example';
+    vi.stubEnv('ControlPlaneToken', 'deploy-token');
+    vi.stubEnv('RegistryUrl', url);
+    mocks.readEnv.mockReturnValue(`${local}\nControlPlaneToken=file-token`);
+    mocks.pull.mockResolvedValue(
+      response({
+        BullBoardEnabled: false,
+        ControlPlaneToken: 'remote-token',
+        RegistryUrl: 'https://remote.example',
+      }),
+    );
+    await initConfigCenter();
+    await vi.advanceTimersByTimeAsync(SYNC_CONFIG_INTERVAL);
+    expect(mocks.pull).toHaveBeenCalledTimes(2);
+    for (const [target, options] of mocks.pull.mock.calls) {
+      expect(target).toBe(`${url}/api/config-files/client/pull`);
+      expect(options).toMatchObject({
+        headers: { Authorization: 'Bearer deploy-token' },
+        maxRedirects: 0,
+      });
+    }
+    expect(getConfig('ControlPlaneToken')).toBe('deploy-token');
+    expect(getConfig('RegistryUrl')).toBe(url);
   });
 });

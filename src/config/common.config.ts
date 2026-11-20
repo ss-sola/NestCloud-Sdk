@@ -5,6 +5,7 @@ import {
   IsOptional,
   IsString,
   IsUrl,
+  Matches,
   Max,
   Min,
 } from 'class-validator';
@@ -23,6 +24,11 @@ export class CommonConfig {
   @IsOptional()
   @IsUrl(SERVICE_BASE_URL_OPTIONS)
   ServiceBaseUrl?: string;
+
+  /** 允许留空以兼容未启用鉴权的控制面。 */
+  @IsOptional()
+  @Matches(/^(?:[A-Za-z0-9._~+/-]+=*)?$/)
+  ControlPlaneToken?: string;
 
   @Type(() => Number)
   @IsInt()

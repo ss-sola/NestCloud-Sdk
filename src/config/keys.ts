@@ -19,6 +19,8 @@ export const ConfigKeys = {
   // ── 注册中心 & 远程配置 ──────────────────────────────────────────────
   /** 注册中心 / 配置中心服务器的基础 URL */
   RegistryUrl: 'RegistryUrl',
+  /** 部署方设置的控制面共享凭证，仅从本地部署配置读取。 */
+  ControlPlaneToken: 'ControlPlaneToken',
   /** 启动时拉取的远程配置文件名，多个以逗号分隔 */
   ConfigNames: 'ConfigNames',
   /** 向注册中心广播的任意元数据对象 */
