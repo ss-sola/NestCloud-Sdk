@@ -1,0 +1,74 @@
+{
+  "name": "@nest-cloud/sdk",
+  "version": "1.0.0",
+  "private": true,
+  "description": "NestCloud SDK for NestJS configuration, service discovery and shared infrastructure",
+  "license": "UNLICENSED",
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE",
+    ".husky/install.mjs"
+  ],
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json && tsc-alias -p tsconfig.build.json",
+    "format": "oxfmt --write src vitest.config.mts",
+    "lint": "oxlint src vitest.config.mts",
+    "test": "vitest run",
+    "tsgo": "tsgo --noEmit -p tsconfig.json",
+    "prepare": "node .husky/install.mjs"
+  },
+  "dependencies": {
+    "@nestjs/common": "^11.1.23",
+    "@nestjs/core": "^11.1.23",
+    "@nestjs/platform-express": "^11.1.23",
+    "@nestjs/typeorm": "^11.0.1",
+    "@opentelemetry/api": "1.9.1",
+    "@opentelemetry/core": "2.7.1",
+    "@opentelemetry/sdk-trace-base": "2.7.1",
+    "@types/express": "^5.0.6",
+    "@types/express-session": "^1.19.0",
+    "@types/node": "^25.9.1",
+    "axios": "^1.16.1",
+    "chalk": "^4.1.2",
+    "class-transformer": "^0.5.1",
+    "class-validator": "^0.15.1",
+    "dotenv": "^17.4.2",
+    "express-session": "^1.19.0",
+    "fast-glob": "^3.3.3",
+    "ioredis": "^5.10.1",
+    "js-yaml": "^4.1.1",
+    "opossum": "^9.0.0",
+    "pg": "^8.16.3",
+    "reflect-metadata": "^0.2.2",
+    "rxjs": "^7.8.2",
+    "typeorm": "^0.3.30",
+    "winston": "^3.19.0",
+    "winston-daily-rotate-file": "^5.0.0",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@types/js-yaml": "^4.0.9",
+    "@typescript/native-preview": "^7.0.0-dev.20260522.1",
+    "husky": "^9.1.7",
+    "lint-staged": "^17.0.5",
+    "oxfmt": "0.54.0",
+    "oxlint": "1.69.0",
+    "tsc-alias": "^1.8.17",
+    "typescript": "^6.0.3",
+    "vitest": "4.1.9"
+  },
+  "lint-staged": {
+    "*.{ts,tsx,mts,cts,js,jsx,mjs,cjs}": [
+      "oxfmt --write",
+      "oxlint"
+    ],
+    "*.{json,md,yml,yaml}": "oxfmt --write"
+  },
+  "engines": {
+    "node": ">=24.16.0"
+  },
+  "packageManager": "pnpm@10.28.2+sha512.41872f037ad22f7348e3b1debbaf7e867cfd448f2726d9cf74c08f19507c31d2c8e7a11525b983febc2df640b5438dee6023ebb1f84ed43cc2d654d2bc326264"
+}

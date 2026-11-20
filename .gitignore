@@ -1,0 +1,8 @@
+node_modules/
+dist/
+coverage/
+logs/
+.pnpm-store/
+.env
+.env.local
+*.tsbuildinfo

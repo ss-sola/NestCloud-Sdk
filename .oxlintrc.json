@@ -1,0 +1,32 @@
+{
+  "$schema": "./node_modules/oxlint/configuration_schema.json",
+  "plugins": ["typescript", "unicorn", "oxc", "vitest"],
+  "categories": {
+    "correctness": "error"
+  },
+  "env": {
+    "builtin": true,
+    "node": true
+  },
+  "ignorePatterns": ["dist/**", "node_modules/**", "**/*.d.ts"],
+  "rules": {
+    "no-unused-vars": "off",
+    "typescript/no-explicit-any": "off",
+    "typescript/no-floating-promises": "off",
+    "typescript/require-await": "warn",
+    "vitest/require-mock-type-parameters": "off"
+  },
+  "overrides": [
+    {
+      "files": ["src/__tests__/**/*.ts"],
+      "env": {
+        "node": true,
+        "vitest": true
+      },
+      "rules": {
+        "vitest/prefer-importing-vitest-globals": "off",
+        "vitest/expect-expect": "off"
+      }
+    }
+  ]
+}
