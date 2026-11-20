@@ -11,6 +11,6 @@
 
 - `dev/master` 是项目的主开发分支。新功能在 `feature/*` 分支上开发，完成后可合入 `dev/master`。
 - 修复 bug 统一使用固定分支 `feature/test`，修复完成后可合入 `dev/master`。
-- 每次合入 `dev/master` 后，必须将本地 `dev/master` 推送到对应的远端 `dev/master`，从 `feature/test` 合入时也要推送。
-- 推送成功后，删除本次合入的 `feature/*` 本地分支及其对应的远端分支（如存在）。删除前须确认待删分支的最新提交已包含在远端 `dev/master` 中。固定分支 `feature/test` 在本地和远端均须保留。
-- `master` 用于打包和创建发布标签（tag）。只有 `dev/master` 可以合入 `master`，且每次合入都必须生成合并提交（`--no-ff`）。
+- `dev/master` 和 `master` 均通过 GitHub Pull Request 更新，合并前须通过 lint、测试、类型检查和构建。
+- PR 合并后，删除本次合入的 `feature/*` 本地分支及其对应的远端分支（如存在）。删除前须确认待删分支的最新提交已包含在远端 `dev/master` 中。固定分支 `feature/test` 在本地和远端均须保留。
+- `master` 用于打包和创建发布标签。发布 PR 由本仓库的 `dev/master` 发起，并使用 Merge Commit 合并。

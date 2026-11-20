@@ -1,0 +1,40 @@
+name: PR verification
+
+on:
+  pull_request:
+    branches: [dev/master, master]
+    types: [opened, synchronize, reopened, edited, ready_for_review]
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: NestCloud SDK / lint, test, types and build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      HUSKY: '0'
+      VITEST_MAX_WORKERS: '1'
+    steps:
+      - name: Check out the proposed merge
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24.16.0'
+          package-manager-cache: false
+
+      - uses: pnpm/action-setup@v6
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Lint, test, type-check and build
+        run: |
+          pnpm run lint
+          pnpm run test
+          pnpm run tsgo
+          pnpm run build
