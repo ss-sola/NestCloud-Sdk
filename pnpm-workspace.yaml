@@ -1,3 +1,8 @@
-onlyBuiltDependencies:
-  - '@nestjs/core'
-  - esbuild
+minimumReleaseAgeExclude:
+  - '@nestjs/common@12.6.0'
+  - '@nestjs/core@12.6.0'
+  - '@nestjs/platform-express@12.6.0'
+allowBuilds:
+  '@nestjs/core': true
+  '@swc/core': false
+  esbuild: true

@@ -19,7 +19,7 @@ vi.mock('dotenv', () => ({
 
 async function importConfigCenter() {
   vi.resetModules();
-  return import('../../config-center');
+  return import('../../config-center/index.js');
 }
 
 describe('config-center loadConfig', () => {
