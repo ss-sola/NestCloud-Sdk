@@ -24,7 +24,7 @@ export async function bootstrap(options: IOptions) {
     setOptions(options);
     await initConfigCenter();
 
-    const sessionOptions = readSessionOptions();
+    const sessionOptions = options.http?.session === false ? undefined : readSessionOptions();
     const port = getConfig<number>(ConfigKeys.Port);
     const globalPrefix = getConfig<string>(ConfigKeys.GlobalPrefix, '', false);
     const pattern = getConfig<string>(ConfigKeys.Pattern, undefined, false) || undefined;
@@ -37,6 +37,7 @@ export async function bootstrap(options: IOptions) {
     const app = await NestFactory.create<NestExpressApplication>(dynamicModule, {
       bufferLogs: true, // 缓冲日志直到自定义日志器准备好
       logger,
+      bodyParser: options.http?.bodyParser,
     });
 
     if (globalPrefix) {
@@ -45,11 +46,8 @@ export async function bootstrap(options: IOptions) {
     app.use((req: Request, res: Response, next: NextFunction) => {
       ContextService.setStore({ req, res }, next);
     });
-    app.enableCors({
-      origin: true,
-      credentials: true,
-    });
-    app.use(createRedisSession(sessionOptions));
+    if (options.http?.cors !== false) app.enableCors({ origin: true, credentials: true });
+    if (sessionOptions) app.use(createRedisSession(sessionOptions));
 
     if (options.configureApp) {
       await options.configureApp(app);

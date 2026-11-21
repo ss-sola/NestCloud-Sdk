@@ -38,6 +38,7 @@ export * from './client/enable-registry-client.decorator';
 export * from './client/registry-client.module';
 export * from './client/registry-client.service';
 export * from './client/registry-client.options';
+export { HEARTBEAT_INTERVAL, REGISTRY_LEASE_TIMEOUT_MS } from './client/registry-client.constants';
 
 export * from './database/enable-typeorm.decorator';
 export * from './database/database-idempotency.service';

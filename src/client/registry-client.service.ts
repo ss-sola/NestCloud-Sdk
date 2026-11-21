@@ -21,9 +21,13 @@ import { ControlPlaneRequestUtil } from './control-plane-request.util';
 export class RegistryClientService implements AfterApplicationBootstrap, OnModuleDestroy {
   private readonly logger = new Logger(RegistryClientService.name);
   private readonly requestOptions: AxiosRequestConfig;
+  private readonly heartbeatInterval: number;
   private instanceId: string;
   private heartbeatTimer?: NodeJS.Timeout;
   private syncTimer?: NodeJS.Timeout;
+  private syncing = false;
+  private syncTask?: Promise<void>;
+  private lastSyncAt?: number;
   private registrationAttempt?: Promise<void>;
   private registrationRetryTimer?: NodeJS.Timeout;
   private isHeartbeating = false;
@@ -36,6 +40,7 @@ export class RegistryClientService implements AfterApplicationBootstrap, OnModul
     private readonly options: RegistryClientOption,
   ) {
     this.instanceId = `${options.serviceName}-${options.serviceHost}-${options.servicePort}`;
+    this.heartbeatInterval = Number(options.heartbeatInterval ?? HEARTBEAT_INTERVAL);
     this.requestOptions = {
       timeout: DEFAULT_REMOTE_TIMEOUT,
       ...ControlPlaneRequestUtil.authOptions(options.controlPlaneToken),
@@ -43,6 +48,10 @@ export class RegistryClientService implements AfterApplicationBootstrap, OnModul
   }
 
   async afterApplicationBootstrap() {
+    if (this.options.discoveryOnly) {
+      await this.startServiceSync();
+      return;
+    }
     if (!enableAutoRegister(getOptions().AppModule)) return;
     // 如果注册中心地址是自己，则不注册
     const currentUrl = ServiceAddressUtil.httpOrigin(
@@ -55,20 +64,16 @@ export class RegistryClientService implements AfterApplicationBootstrap, OnModul
     // 注册自己
     await this.registerWithRetry();
     if (!this.registrationStarted) return;
-    await this.syncServices(); // 启动时先拉一次
-    if (!this.registrationStarted) return;
-
-    // 定时同步服务列表
-    const syncInterval = this.options.syncInterval ?? SYNC_INTERVAL;
-    this.syncTimer = setInterval(() => this.syncServices(), syncInterval);
+    await this.startServiceSync();
   }
 
   async onModuleDestroy() {
+    this.syncing = false;
+    if (this.syncTimer) clearInterval(this.syncTimer);
     if (!this.registrationStarted) return;
     this.registrationStarted = false;
     if (this.registrationRetryTimer) clearTimeout(this.registrationRetryTimer);
     this.stopHeartbeat();
-    if (this.syncTimer) clearInterval(this.syncTimer);
     // 请求可能已到达注册中心，等待完成后下线，避免退出时留下活动实例。
     await this.registrationAttempt;
     await this.unregister();
@@ -107,6 +112,7 @@ export class RegistryClientService implements AfterApplicationBootstrap, OnModul
         host: this.options.serviceHost,
         port: this.options.servicePort,
         baseUrl: this.options.serviceBaseUrl,
+        heartbeatInterval: this.heartbeatInterval,
         metadata: this.options.metadata,
       },
       this.requestOptions,
@@ -163,8 +169,7 @@ export class RegistryClientService implements AfterApplicationBootstrap, OnModul
       return;
     }
 
-    const interval = this.options.heartbeatInterval ?? HEARTBEAT_INTERVAL;
-    this.heartbeatTimer = setInterval(() => this.heartbeat(), interval);
+    this.heartbeatTimer = setInterval(() => this.heartbeat(), this.heartbeatInterval);
   }
 
   private stopHeartbeat() {
@@ -176,6 +181,24 @@ export class RegistryClientService implements AfterApplicationBootstrap, OnModul
     this.heartbeatTimer = undefined;
   }
 
+  private async startServiceSync() {
+    if (this.syncing) return;
+    this.syncing = true;
+    await this.refreshServices();
+    if (!this.syncing) return;
+    this.syncTimer = setInterval(
+      () => void this.refreshServices(),
+      this.options.syncInterval ?? SYNC_INTERVAL,
+    );
+  }
+
+  private refreshServices() {
+    this.syncTask ??= this.syncServices().finally(() => {
+      this.syncTask = undefined;
+    });
+    return this.syncTask;
+  }
+
   private async syncServices() {
     try {
       const res = await axios.get(
@@ -183,6 +206,11 @@ export class RegistryClientService implements AfterApplicationBootstrap, OnModul
         this.requestOptions,
       );
       const serviceMap = unwrapResponsePayload<Record<string, ServiceInstance[]>>(res.data);
+      if (!serviceMap || typeof serviceMap !== 'object' || Array.isArray(serviceMap) ||
+          !Object.values(serviceMap).every(Array.isArray)) {
+        throw new Error('Invalid registry service list');
+      }
+      if (!this.syncing) return;
 
       const newCache = new Map<string, ServiceInstance[]>();
       for (const key in serviceMap) {
@@ -190,6 +218,7 @@ export class RegistryClientService implements AfterApplicationBootstrap, OnModul
       }
 
       this.cache = newCache; // 只有成功时才替换
+      this.lastSyncAt = Date.now();
       this.logger.debug(`服务实例已同步到本地缓存: ${JSON.stringify(serviceMap)}`);
     } catch (err: any) {
       this.logger.error(
@@ -202,6 +231,10 @@ export class RegistryClientService implements AfterApplicationBootstrap, OnModul
   // === 本地服务发现 ===
   getInstances(serviceName: string): ServiceInstance[] {
     return this.cache.get(serviceName) ?? [];
+  }
+
+  getLastSyncAt(): number | undefined {
+    return this.lastSyncAt;
   }
 
   listServices(): Array<{

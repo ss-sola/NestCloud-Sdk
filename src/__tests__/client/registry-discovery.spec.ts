@@ -103,6 +103,32 @@ describe('服务注册与发现', () => {
     );
   });
 
+  it('默认在注册成功 30 秒后发送第一次心跳', async () => {
+    vi.useFakeTimers();
+    const registryUrl = 'http://registry.internal:3100';
+    const client = new RegistryClientService({
+      registryUrl,
+      serviceName: 'files',
+      serviceHost: '10.0.0.7',
+      servicePort: 3300,
+    });
+    const heartbeatUrl = `${registryUrl}/api/registry/heartbeat/files-10.0.0.7-3300`;
+    const heartbeats = () => vi.mocked(axios.post).mock.calls.filter(([url]) => url === heartbeatUrl);
+    try {
+      await client.afterApplicationBootstrap();
+      expect(records[0]).toMatchObject({ heartbeatInterval: 30_000 });
+      await vi.advanceTimersByTimeAsync(29_999);
+      expect(heartbeats()).toHaveLength(0);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(heartbeats()).toHaveLength(1);
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(heartbeats()).toHaveLength(2);
+    } finally {
+      await client.onModuleDestroy();
+      vi.useRealTimers();
+    }
+  });
+
   it('首次注册失败超过原有上限后仍按固定间隔重试，恢复后发送带鉴权的心跳', async () => {
     vi.useFakeTimers();
     const token = 'control-plane-test-token';
@@ -134,7 +160,7 @@ describe('服务注册与发现', () => {
       );
       expect(axios.post).toHaveBeenCalledWith(
         `${registryUrl}/api/registry/register`,
-        expect.anything(),
+        expect.objectContaining({ heartbeatInterval: 1_000 }),
         auth,
       );
       expect(axios.get).toHaveBeenCalledWith(`${registryUrl}/api/registry/all`, auth);

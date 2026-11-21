@@ -19,8 +19,8 @@ vi.mock('dotenv', () => ({
 
 async function importModules() {
   vi.resetModules();
-  const configCenter = await import('../../config-center');
-  const configModule = await import('../../config/common.config');
+  const configCenter = await import('../../config-center/index.js');
+  const configModule = await import('../../config/common.config.js');
   return { configCenter, configModule };
 }
 

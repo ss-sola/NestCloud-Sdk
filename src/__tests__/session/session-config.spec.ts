@@ -24,7 +24,7 @@ afterEach(() => {
 });
 
 it('refuses to start without a signing key', async () => {
-  const { readSessionOptions } = await import('../../session/session.config');
+  const { readSessionOptions } = await import('../../session/session.config.js');
   vi.stubEnv('SessionSecret', undefined);
   expect(() => readSessionOptions()).toThrow('SessionSecret');
 
@@ -33,7 +33,7 @@ it('refuses to start without a signing key', async () => {
 });
 
 it('selects the in-process store when only the signing key is supplied', async () => {
-  const { readSessionOptions } = await import('../../session/session.config');
+  const { readSessionOptions } = await import('../../session/session.config.js');
   vi.stubEnv('SessionSecret', 'fixture-signing-key');
   vi.stubEnv('SessionRedisUrl', undefined);
   expect(readSessionOptions()).toMatchObject({
@@ -43,8 +43,8 @@ it('selects the in-process store when only the signing key is supplied', async (
 });
 
 it('validates deployment credentials and passes them to the session factory', async () => {
-  const { validateConfig } = await import('../../config-center');
-  const { readSessionOptions } = await import('../../session/session.config');
+  const { validateConfig } = await import('../../config-center/index.js');
+  const { readSessionOptions } = await import('../../session/session.config.js');
   const redisUrl = 'redis://127.0.0.1:6379/2';
   vi.stubEnv('SessionSecret', 'fixture-signing-key');
   vi.stubEnv('SessionRedisUrl', redisUrl);
