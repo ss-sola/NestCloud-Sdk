@@ -7,7 +7,7 @@ import {
   OnApplicationBootstrap,
   OnModuleDestroy,
 } from '@nestjs/common';
-import axios from 'axios';
+import axios, { type AxiosRequestConfig } from 'axios';
 import { z } from 'zod';
 import { RegistryClientOption, ServiceInstance } from './registry-client.options';
 import {
@@ -29,6 +29,7 @@ import { enableAutoRegister } from './enable-registry-client.decorator';
 import { getOptions } from '@/config-center/options';
 import { DEFAULT_REMOTE_TIMEOUT } from '@/constants/http.constants';
 import { ProjectException } from '@/exception/global.exception';
+import { ControlPlaneRequestUtil } from './control-plane-request.util';
 
 const serviceMapSchema = z.record(
   z.string(),
@@ -67,15 +68,19 @@ export class RegistryClientService
 {
   private readonly logger = new Logger(RegistryClientService.name);
   private readonly instanceId: string;
+  private readonly heartbeatInterval: number;
   private readonly syncInterval: number;
+  private readonly requestOptions: AxiosRequestConfig;
   private readonly shutdown = new AbortController();
   private heartbeatTimer?: NodeJS.Timeout;
   private reregisterTimer?: NodeJS.Timeout;
   private syncTimer?: NodeJS.Timeout;
+  private registrationAttempt?: Promise<void>;
   private isRegistering = false;
   private isHeartbeating = false;
   private registered = false;
   private isSyncing = false;
+  private lastSyncAt?: number;
   private roundRobinCounter = new Map<string, number>(); // 为每个服务维护一个轮询计数
   private cache?: { services: Map<string, ServiceInstance[]>; expiresAt: number };
 
@@ -84,6 +89,11 @@ export class RegistryClientService
     private readonly options: RegistryClientOption,
   ) {
     this.instanceId = `${options.serviceName}-${options.serviceHost}-${options.servicePort}`;
+    this.heartbeatInterval = Number(options.heartbeatInterval ?? HEARTBEAT_INTERVAL);
+    this.requestOptions = {
+      timeout: DEFAULT_REMOTE_TIMEOUT,
+      ...ControlPlaneRequestUtil.authOptions(options.controlPlaneToken),
+    };
     const syncInterval = Number(options.syncInterval ?? SYNC_INTERVAL);
     this.syncInterval =
       Number.isInteger(syncInterval) && syncInterval >= 1 && syncInterval <= MAX_SYNC_INTERVAL
@@ -92,7 +102,7 @@ export class RegistryClientService
   }
 
   async onApplicationBootstrap() {
-    if (!enableAutoRegister(getOptions().AppModule)) return;
+    if (this.options.discoveryOnly || !enableAutoRegister(getOptions().AppModule)) return;
     // 如果注册中心地址是自己，则不注册
     const currentUrl = ServiceAddressUtil.httpOrigin(
       this.options.serviceHost,
@@ -105,15 +115,16 @@ export class RegistryClientService
   }
 
   async afterApplicationBootstrap() {
-    if (!this.registered) return;
+    if ((!this.registered && !this.options.discoveryOnly) || this.syncTimer) return;
     await this.syncServices(); // 启动时先拉一次
-    if (this.shutdown.signal.aborted) return;
+    if (this.shutdown.signal.aborted || this.syncTimer) return;
 
     // 定时同步服务列表
     this.syncTimer = setInterval(() => this.syncServices(), this.syncInterval);
   }
 
   async onModuleDestroy() {
+    if (this.shutdown.signal.aborted) return;
     this.shutdown.abort();
     this.stopHeartbeat();
     if (this.reregisterTimer) {
@@ -121,6 +132,8 @@ export class RegistryClientService
       this.reregisterTimer = undefined;
     }
     if (this.syncTimer) clearInterval(this.syncTimer);
+    // 注册请求可能已被服务端接受，等待它结束再注销实例。
+    await this.registrationAttempt?.catch(() => undefined);
     if (this.registered) await this.unregister();
   }
 
@@ -163,25 +176,30 @@ export class RegistryClientService
   }
 
   private async register() {
-    const signal = this.registryRequestSignal();
-    signal.throwIfAborted();
-    await axios.post(
-      `${this.options.registryUrl}/api/registry/register`,
-      {
-        id: this.instanceId,
-        name: this.options.serviceName,
-        host: this.options.serviceHost,
-        port: this.options.servicePort,
-        baseUrl: this.options.serviceBaseUrl,
-        metadata: this.options.metadata,
-      },
-      { signal },
-    );
     this.shutdown.signal.throwIfAborted();
-    this.registered = true;
-    this.logger.log(`Registered as ${this.instanceId}`);
-
-    this.startHeartbeat();
+    this.registrationAttempt ??= axios
+      .post(
+        `${this.options.registryUrl}/api/registry/register`,
+        {
+          id: this.instanceId,
+          name: this.options.serviceName,
+          host: this.options.serviceHost,
+          port: this.options.servicePort,
+          baseUrl: this.options.serviceBaseUrl,
+          heartbeatInterval: this.heartbeatInterval,
+          metadata: this.options.metadata,
+        },
+        { ...this.requestOptions, signal: AbortSignal.timeout(DEFAULT_REMOTE_TIMEOUT) },
+      )
+      .then(() => {
+        this.registered = true;
+        this.logger.log(`Registered as ${this.instanceId}`);
+        if (!this.shutdown.signal.aborted) this.startHeartbeat();
+      })
+      .finally(() => {
+        this.registrationAttempt = undefined;
+      });
+    await this.registrationAttempt;
   }
 
   private async reregister(retryInterval: number) {
@@ -211,6 +229,7 @@ export class RegistryClientService
         `${this.options.registryUrl}/api/registry/unregister/${this.instanceId}`,
         undefined,
         {
+          ...this.requestOptions,
           signal: AbortSignal.timeout(DEFAULT_REMOTE_TIMEOUT),
         },
       );
@@ -235,7 +254,7 @@ export class RegistryClientService
       const res = await axios.post<{ success: boolean }>(
         `${this.options.registryUrl}/api/registry/heartbeat/${this.instanceId}`,
         undefined,
-        { signal: this.registryRequestSignal() },
+        { ...this.requestOptions, signal: this.registryRequestSignal() },
       );
       const heartbeatResult = unwrapResponsePayload<{ success: boolean }>(res.data);
 
@@ -263,8 +282,7 @@ export class RegistryClientService
       return;
     }
 
-    const interval = this.options.heartbeatInterval ?? HEARTBEAT_INTERVAL;
-    this.heartbeatTimer = setInterval(() => this.heartbeat(), interval);
+    this.heartbeatTimer = setInterval(() => this.heartbeat(), this.heartbeatInterval);
   }
 
   private stopHeartbeat() {
@@ -282,6 +300,7 @@ export class RegistryClientService
 
     try {
       const res = await axios.get<unknown>(`${this.options.registryUrl}/api/registry/all`, {
+        ...this.requestOptions,
         signal: this.registryRequestSignal(),
       });
       if (this.shutdown.signal.aborted) return;
@@ -294,6 +313,7 @@ export class RegistryClientService
         services: new Map(Object.entries(snapshot.data)),
         expiresAt: performance.now() + this.syncInterval * DISCOVERY_CACHE_MAX_AGE_INTERVALS,
       };
+      this.lastSyncAt = Date.now();
       this.logger.debug(`服务实例已同步到本地缓存: ${JSON.stringify(snapshot.data)}`);
     } catch (err: unknown) {
       if (this.shutdown.signal.aborted) return;
@@ -320,6 +340,10 @@ export class RegistryClientService
       this.cache = undefined;
     }
     return this.cache?.services;
+  }
+
+  getLastSyncAt(): number | undefined {
+    return this.lastSyncAt;
   }
 
   listServices(): Array<{

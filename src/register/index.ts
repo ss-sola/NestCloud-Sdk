@@ -6,6 +6,7 @@ import { getMetadataArgsStorage } from 'typeorm';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { ConfigInjectorService } from '@/config-center/config-injector.service';
 import NodeModule from 'module';
+import { pathToFileURL } from 'node:url';
 import { AfterAppBootstrapRunner } from '@/ext/after-application-bootstrap.runner';
 import { enableTypeOrm } from '@/database/enable-typeorm.decorator';
 import { DatabaseIdempotencyService } from '@/database/database-idempotency.service';
@@ -39,7 +40,7 @@ export async function scanAutoRegister(pattern = 'dist/**/*.js') {
     ],
   });
   for (const file of files) {
-    const module = (await import(file)) as NodeModule;
+    const module = (await import(pathToFileURL(file).href)) as NodeModule;
     for (const exportedKey in module) {
       const exported = module[exportedKey] as Provider;
       if (typeof exported === 'function') {

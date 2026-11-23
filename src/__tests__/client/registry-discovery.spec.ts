@@ -101,6 +101,7 @@ describe('服务注册与发现', () => {
       id: 'files-10.0.0.7-3300',
       host: '10.0.0.7',
       port: 3300,
+      heartbeatInterval: 30_000,
       baseUrl: configured ?? base,
     });
     await client.detail({ id: 7 });
@@ -188,21 +189,76 @@ describe('服务注册与发现', () => {
     expect(requests.filter((url) => url.includes('/heartbeat/'))).toHaveLength(2);
   });
 
+  it('注册、续约、同步和注销保留控制面凭证及心跳间隔', async () => {
+    vi.useFakeTimers();
+    const heartbeatInterval = 1_000;
+    config.set(ConfigKeys.HeartbeatInterval, heartbeatInterval);
+    config.set(ConfigKeys.ControlPlaneToken, 'control-plane-test-token');
+    const listingUrl = 'http://registry.internal:3100/api/registry';
+    const instanceId = 'files-10.0.0.7-3300';
+    const authenticated = expect.objectContaining({
+      headers: { Authorization: 'Bearer control-plane-test-token' },
+      maxRedirects: 0,
+    });
+
+    await start();
+    expect(axios.post).toHaveBeenCalledWith(
+      `${listingUrl}/register`,
+      expect.objectContaining({ heartbeatInterval }),
+      authenticated,
+    );
+    expect(axios.get).toHaveBeenCalledWith(`${listingUrl}/all`, authenticated);
+    await vi.advanceTimersByTimeAsync(heartbeatInterval);
+    expect(axios.post).toHaveBeenCalledWith(
+      `${listingUrl}/heartbeat/${instanceId}`,
+      undefined,
+      authenticated,
+    );
+    await app?.close();
+    app = undefined;
+    expect(axios.post).toHaveBeenCalledWith(
+      `${listingUrl}/unregister/${instanceId}`,
+      undefined,
+      authenticated,
+    );
+  });
+
+  it('仅发现模式仍同步服务并记录成功时间', async () => {
+    vi.useFakeTimers();
+    const registry = new RegistryClientService({
+      registryUrl: 'http://registry.internal:3100',
+      serviceName: 'gateway',
+      serviceHost: '10.0.0.8',
+      servicePort: 3301,
+      discoveryOnly: true,
+    });
+
+    try {
+      expect(registry.getLastSyncAt()).toBeUndefined();
+      await registry.onApplicationBootstrap();
+      await registry.afterApplicationBootstrap();
+      expect(registry.getLastSyncAt()).toBe(Date.now());
+      expect(registry.getInstances('files', { requireFresh: true })).toEqual([]);
+    } finally {
+      await registry.onModuleDestroy();
+    }
+    expect(axios.get).toHaveBeenCalledTimes(1);
+    expect(axios.post).not.toHaveBeenCalled();
+  });
+
   it.each([
     ['等待重试', false],
     ['重注册请求进行中', true],
   ])('关闭时停止恢复流程（%s）', async (_scenario, pendingRequest) => {
     vi.useFakeTimers();
     let registrationAttempts = 0;
-    let recoverySignal: AbortSignal | undefined;
-    vi.mocked(axios.post).mockImplementation(async (url, _data, options) => {
+    let finishRegistration: (() => void) | undefined;
+    vi.mocked(axios.post).mockImplementation(async (url) => {
       if (url.includes('/heartbeat/')) return { data: { success: false } };
       if (url.endsWith('/register') && ++registrationAttempts > 1) {
         if (!pendingRequest) throw new Error('registry unavailable');
-        const signal = options?.signal as AbortSignal;
-        recoverySignal = signal;
-        return new Promise((_resolve, reject) => {
-          signal.addEventListener('abort', () => reject(signal.reason), { once: true });
+        return new Promise((resolve) => {
+          finishRegistration = () => resolve({ data: {} });
         });
       }
       return { data: {} };
@@ -211,9 +267,16 @@ describe('服务注册与发现', () => {
     await vi.advanceTimersByTimeAsync(HEARTBEAT_INTERVAL);
     expect(registrationAttempts).toBe(2);
 
-    await app?.close();
+    const closing = app!.close();
+    const unregisterCalls = () =>
+      vi.mocked(axios.post).mock.calls.filter(([url]) => url.includes('/unregister/'));
+    await vi.advanceTimersByTimeAsync(0);
+    const unregisterCountBeforeRegistrationSettled = unregisterCalls().length;
+    finishRegistration?.();
+    await closing;
     app = undefined;
-    expect(Boolean(recoverySignal?.aborted)).toBe(pendingRequest);
+    expect(unregisterCountBeforeRegistrationSettled).toBe(pendingRequest ? 0 : 1);
+    expect(unregisterCalls()).toHaveLength(1);
     await vi.advanceTimersByTimeAsync(MAX_REREGISTER_INTERVAL * 2);
     expect(registrationAttempts).toBe(2);
   });
