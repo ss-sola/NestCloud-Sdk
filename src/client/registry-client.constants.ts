@@ -8,5 +8,7 @@ export const MAX_SYNC_INTERVAL = 2_147_483_647; // Node.js 定时器支持的最
 
 export const REGISTER_RETRY_INTERVAL = 3_000; // 注册失败后默认每 3 秒重试一次
 export const REGISTER_MAX_RETRIES = 5; // 注册失败后默认最多重试 5 次
+export const MAX_REREGISTER_INTERVAL = 30_000; // 运行期重注册退避上限
+export const REREGISTER_JITTER_RATIO = 0.2; // 在退避间隔内最多提前 20%，分散重试流量
 
 export const SYNC_CONFIG_INTERVAL = 60_000; // 同步配置间隔，默认 60 秒

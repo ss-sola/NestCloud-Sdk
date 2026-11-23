@@ -6,6 +6,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { EnableAutoRegister } from '../../client/enable-registry-client.decorator';
 import {
   DISCOVERY_CACHE_MAX_AGE_INTERVALS,
+  HEARTBEAT_INTERVAL,
+  MAX_REREGISTER_INTERVAL,
   REGISTER_MAX_RETRIES,
   REGISTER_RETRY_INTERVAL,
   SYNC_INTERVAL,
@@ -130,6 +132,90 @@ describe('服务注册与发现', () => {
     expect(app.getHttpServer().listening).toBe(false);
     expect(axios.post).toHaveBeenCalledTimes(REGISTER_MAX_RETRIES);
     expect(axios.get).not.toHaveBeenCalled();
+  });
+
+  it('运行期丢失租约后持续退避重注册，直到恢复心跳', async () => {
+    vi.useFakeTimers();
+    vi.spyOn(Math, 'random').mockReturnValue(0);
+    let canRegister = true;
+    let leaseExists = false;
+    let registrationAttempts = 0;
+    let heartbeats = 0;
+    vi.mocked(axios.post).mockImplementation(async (url) => {
+      if (url.endsWith('/register')) {
+        registrationAttempts += 1;
+        if (!canRegister) throw new Error('registry unavailable');
+        leaseExists = true;
+      }
+      if (url.includes('/heartbeat/')) {
+        heartbeats += 1;
+        return { data: { code: 200, data: { success: leaseExists } } };
+      }
+      return { data: {} };
+    });
+    await start();
+    leaseExists = false;
+    canRegister = false;
+
+    await vi.advanceTimersByTimeAsync(HEARTBEAT_INTERVAL);
+    expect(registrationAttempts).toBe(2);
+    for (const interval of [3_000, 6_000, 12_000, 24_000, MAX_REREGISTER_INTERVAL]) {
+      const previousAttempts = registrationAttempts;
+      await vi.advanceTimersByTimeAsync(interval - 1);
+      expect(registrationAttempts).toBe(previousAttempts);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(registrationAttempts).toBe(previousAttempts + 1);
+    }
+    expect(heartbeats).toBe(1);
+
+    canRegister = true;
+    await vi.advanceTimersByTimeAsync(MAX_REREGISTER_INTERVAL);
+    expect(registrationAttempts).toBe(8);
+    await vi.advanceTimersByTimeAsync(HEARTBEAT_INTERVAL * 2);
+    expect(heartbeats).toBe(3);
+    expect(registrationAttempts).toBe(8);
+  });
+
+  it('心跳请求失败后继续续约', async () => {
+    vi.useFakeTimers();
+    await start();
+    vi.mocked(axios.post).mockRejectedValueOnce(new Error('network unavailable'));
+
+    await vi.advanceTimersByTimeAsync(HEARTBEAT_INTERVAL * 2);
+
+    const requests = vi.mocked(axios.post).mock.calls.map(([url]) => url);
+    expect(requests.filter((url) => url.endsWith('/register'))).toHaveLength(1);
+    expect(requests.filter((url) => url.includes('/heartbeat/'))).toHaveLength(2);
+  });
+
+  it.each([
+    ['等待重试', false],
+    ['重注册请求进行中', true],
+  ])('关闭时停止恢复流程（%s）', async (_scenario, pendingRequest) => {
+    vi.useFakeTimers();
+    let registrationAttempts = 0;
+    let recoverySignal: AbortSignal | undefined;
+    vi.mocked(axios.post).mockImplementation(async (url, _data, options) => {
+      if (url.includes('/heartbeat/')) return { data: { success: false } };
+      if (url.endsWith('/register') && ++registrationAttempts > 1) {
+        if (!pendingRequest) throw new Error('registry unavailable');
+        const signal = options?.signal as AbortSignal;
+        recoverySignal = signal;
+        return new Promise((_resolve, reject) => {
+          signal.addEventListener('abort', () => reject(signal.reason), { once: true });
+        });
+      }
+      return { data: {} };
+    });
+    await start();
+    await vi.advanceTimersByTimeAsync(HEARTBEAT_INTERVAL);
+    expect(registrationAttempts).toBe(2);
+
+    await app?.close();
+    app = undefined;
+    expect(Boolean(recoverySignal?.aborted)).toBe(pendingRequest);
+    await vi.advanceTimersByTimeAsync(MAX_REREGISTER_INTERVAL * 2);
+    expect(registrationAttempts).toBe(2);
   });
 
   it('同步故障期间只使用有效期内的快照，同步恢复后使用最新地址', async () => {
