@@ -11,7 +11,7 @@ import {
   type Span,
 } from '@opentelemetry/api';
 import { W3CTraceContextPropagator } from '@opentelemetry/core';
-import { BasicTracerProvider } from '@opentelemetry/sdk-trace-base';
+import { TracerProvider } from '@opentelemetry/sdk-trace';
 import type { IncomingHttpHeaders } from 'node:http';
 
 const TRACER_NAME = '@nest-cloud/sdk';
@@ -19,7 +19,7 @@ const TRACER_NAME = '@nest-cloud/sdk';
 /** 有导出器时使用应用注册的 tracer。未配置采集端时仍生成可写入日志的 W3C 链路。 */
 export class RequestTraceUtil {
   private static readonly propagator = new W3CTraceContextPropagator();
-  private static readonly fallback = new BasicTracerProvider().getTracer(TRACER_NAME);
+  private static readonly fallback = new TracerProvider().getTracer(TRACER_NAME);
 
   static receive(headers: IncomingHttpHeaders, name: string, kind = SpanKind.SERVER): Span {
     const parent = this.propagator.extract(ROOT_CONTEXT, headers, defaultTextMapGetter);

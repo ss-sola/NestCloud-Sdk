@@ -1,11 +1,13 @@
 // client/registry-client.options.ts
 export interface RegistryClient {
   registryUrl: string; // 注册中心地址，例如 http://localhost:3000
+  controlPlaneToken?: string;
   serviceName?: string; // 服务名，例如 system-service
   serviceBaseUrl?: string; // 对外提供的 HTTP(S) 服务基础地址，含可选路径前缀
   metadata?: Record<string, any>; // 附加信息，例如 { version: "1.0.0" }
-  heartbeatInterval?: number; // 心跳间隔，默认 10 秒
+  heartbeatInterval?: number; // 心跳间隔，默认 30 秒
   syncInterval?: number; // 本地缓存同步间隔，默认 15s
+  discoveryOnly?: boolean; // 同步服务列表，无需注册本实例
 }
 
 export interface RegistryClientOption extends RegistryClient {
