@@ -177,11 +177,13 @@ export function loadConfig(filePaths?: string[]) {
 
 async function syncRemoteConfig(serviceName: string) {
   const configUrl = getConfig<string>(ConfigKeys.RegistryUrl);
-  const names = getConfig<string>(ConfigKeys.ConfigNames, '', false)
+  const configuredNames = getConfig<string>(ConfigKeys.ConfigNames, '', false)
     .split(',')
     .map((item) => item.trim())
-    .filter(Boolean)
-    .join(',');
+    .filter(Boolean);
+  const files = new Set(configuredNames);
+  if (serviceName) files.add(`${serviceName}.jsonc`);
+  const names = [...files].join(',');
   if (names.length === 0) {
     return;
   }
@@ -205,6 +207,7 @@ async function syncRemoteConfig(serviceName: string) {
   delete remoteConfig[ConfigKeys.ControlPlaneToken];
   if (token) delete remoteConfig[ConfigKeys.RegistryUrl];
   const candidate = ConfigSnapshotUtil.merge(remoteConfig, localOverrides);
+  if (serviceName) candidate[ConfigKeys.ServiceName] = serviceName;
   const configClass = getOptions().validateConfig;
   if (configClass) {
     validateConfig(configClass, candidate);
