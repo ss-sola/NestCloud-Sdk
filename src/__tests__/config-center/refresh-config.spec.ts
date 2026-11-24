@@ -66,6 +66,17 @@ describe('配置启动与热刷新', () => {
     expect(mocks.pull).not.toHaveBeenCalled();
   });
 
+  it.each([
+    ['', 'upload.jsonc'],
+    ['shared.yaml, team.json', 'shared.yaml,team.json,upload.jsonc'],
+    ['shared.json,upload.jsonc,shared.json', 'shared.json,upload.jsonc'],
+  ])('按服务名补齐并去重配置文件 %s', async (configured, names) => {
+    mocks.readEnv.mockReturnValue(local.replace('ConfigNames=upload.yaml', `ConfigNames=${configured}`));
+    mocks.pull.mockResolvedValue(response({ BullBoardEnabled: true }));
+    await initConfigCenter();
+    expect(mocks.pull.mock.calls[0][1].params).toEqual({ serviceName: 'upload', names });
+  });
+
   it('本地布尔值不合法时阻止启动', async () => {
     setOptions({ AppModule: LocalApp, validateConfig: UploadConfig });
     mocks.readEnv.mockReturnValue(`${local}\nBullBoardEnabled=nope`);
