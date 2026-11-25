@@ -20,7 +20,7 @@ export function EnableAutoRegister({ productionOnly = false } = {}) {
     const existingImports = getModuleImports(target);
     const registryModule = RegistryClientModule.registerAsync({
       useFactory: () => ({
-        registryUrl: getConfig<string>(
+        registryUrl: getConfig<string[]>(
           ConfigKeys.RegistryUrl,
           undefined,
           enableAutoRegister(target),

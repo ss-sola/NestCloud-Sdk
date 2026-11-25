@@ -166,6 +166,6 @@ describe('配置启动与热刷新', () => {
       });
     }
     expect(getConfig('ControlPlaneToken')).toBe('deploy-token');
-    expect(getConfig('RegistryUrl')).toBe(url);
+    expect(getConfig('RegistryUrl')).toEqual([url]);
   });
 });
