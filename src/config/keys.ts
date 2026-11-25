@@ -21,6 +21,8 @@ export const ConfigKeys = {
   RegistryUrl: 'RegistryUrl',
   /** 部署方设置的控制面共享凭证，仅从本地部署配置读取。 */
   ControlPlaneToken: 'ControlPlaneToken',
+  /** 内部进程指标接口的共享签名密钥，仅从部署配置读取。 */
+  ServiceMonitorToken: 'ServiceMonitorToken',
   /** 启动时拉取的远程配置文件名，多个以逗号分隔 */
   ConfigNames: 'ConfigNames',
   /** 向注册中心广播的任意元数据对象 */

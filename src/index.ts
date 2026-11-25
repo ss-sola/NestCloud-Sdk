@@ -33,6 +33,7 @@ export * from './util/response.util';
 export * from './util/value.util';
 
 export * from './type';
+export * from './monitor/process-metrics';
 
 export * from './client/enable-registry-client.decorator';
 export * from './client/registry-client.module';

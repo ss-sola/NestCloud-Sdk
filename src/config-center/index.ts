@@ -95,6 +95,7 @@ export function getConfig<T>(
   // 凭证及其请求目标取自部署配置，避免远程配置将凭证发送到其他地址。
   const deploymentOnly =
     key === ConfigKeys.ControlPlaneToken ||
+    key === ConfigKeys.ServiceMonitorToken ||
     (key === ConfigKeys.RegistryUrl && Boolean(getDeploymentValue(ConfigKeys.ControlPlaneToken)));
   const configuredValue = getValueByPath(configCenter.mainConfig, key);
   const value = deploymentOnly
@@ -123,7 +124,11 @@ export function validateConfig<T extends object>(
   candidate = configCenter.mainConfig,
 ) {
   const token = getConfig<string | undefined>(ConfigKeys.ControlPlaneToken, undefined, false);
-  const snapshot: Record<string, any> = { ...candidate, [ConfigKeys.ControlPlaneToken]: token };
+  const snapshot: Record<string, any> = {
+    ...candidate,
+    [ConfigKeys.ControlPlaneToken]: token,
+    [ConfigKeys.ServiceMonitorToken]: getDeploymentValue(ConfigKeys.ServiceMonitorToken),
+  };
   if (token) {
     snapshot[ConfigKeys.RegistryUrl] = getConfig<string | undefined>(
       ConfigKeys.RegistryUrl,
@@ -205,6 +210,7 @@ async function syncRemoteConfig(serviceName: string) {
   if (localOverrides !== configCenter.devConfig) return;
   const remoteConfig = { ...payload.mergedConfig };
   delete remoteConfig[ConfigKeys.ControlPlaneToken];
+  delete remoteConfig[ConfigKeys.ServiceMonitorToken];
   if (token) delete remoteConfig[ConfigKeys.RegistryUrl];
   const candidate = ConfigSnapshotUtil.merge(remoteConfig, localOverrides);
   if (serviceName) candidate[ConfigKeys.ServiceName] = serviceName;

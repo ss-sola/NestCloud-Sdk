@@ -30,6 +30,10 @@ export class CommonConfig {
   @Matches(/^(?:[A-Za-z0-9._~+/-]+=*)?$/)
   ControlPlaneToken?: string;
 
+  @IsOptional()
+  @Matches(/^(?:[A-Za-z0-9._~+/-]{32,256})?$/)
+  ServiceMonitorToken?: string;
+
   @Type(() => Number)
   @IsInt()
   @Min(1)
