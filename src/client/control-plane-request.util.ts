@@ -1,3 +1,4 @@
+import { DEFAULT_REMOTE_TIMEOUT } from '@/constants/http.constants';
 import axios, { type AxiosRequestConfig } from 'axios';
 
 export class ControlPlaneRequestUtil {
@@ -7,6 +8,26 @@ export class ControlPlaneRequestUtil {
       headers: { Authorization: `Bearer ${token}` },
       maxRedirects: 0,
     };
+  }
+}
+
+export function parseControlPlaneToken(value: unknown): string | string[] {
+  if (typeof value === 'string' && value.trimStart().startsWith('[')) {
+    try {
+      value = JSON.parse(value);
+    } catch {
+      throw new Error('ControlPlaneToken must be a valid JSON array');
+    }
+  }
+  const valid = (token: unknown): token is string =>
+    typeof token === 'string' && /^(?:[A-Za-z0-9._~+/-]+=*)?$/.test(token);
+  if (valid(value) || (Array.isArray(value) && value.length && value.every(valid))) return value;
+  throw new Error('Invalid ControlPlaneToken');
+}
+
+export function validateTokenCount(urls: string[], token?: string | string[]) {
+  if (Array.isArray(token) && token.length !== urls.length) {
+    throw new Error('ControlPlaneToken and RegistryUrl arrays must have the same length');
   }
 }
 
@@ -33,7 +54,7 @@ export function parseRegistryUrls(value: unknown): string[] {
     }
     return url.origin;
   });
-  return [...new Set(origins)];
+  return origins;
 }
 
 export class RegistryEndpoints {
@@ -41,12 +62,22 @@ export class RegistryEndpoints {
 
   constructor(readonly urls: string[]) {}
 
-  async request<T>(send: (origin: string) => Promise<T>): Promise<T> {
+  async request<T>(
+    send: (
+      origin: string,
+      options: Pick<AxiosRequestConfig, 'timeout' | 'headers' | 'maxRedirects'>,
+    ) => Promise<T>,
+    token?: string | string[],
+  ): Promise<T> {
+    validateTokenCount(this.urls, token);
     const start = this.preferred;
     for (let offset = 0; offset < this.urls.length; offset++) {
       const index = (start + offset) % this.urls.length;
       try {
-        const result = await send(this.urls[index]);
+        const result = await send(this.urls[index], {
+          timeout: DEFAULT_REMOTE_TIMEOUT,
+          ...ControlPlaneRequestUtil.authOptions(Array.isArray(token) ? token[index] : token),
+        });
         this.preferred = index;
         return result;
       } catch (error) {

@@ -8,12 +8,16 @@ import { getOptions } from './options';
 import { ProjectException } from '@/exception/global.exception';
 import { enableConfigCenter } from './enable-config-center.decorator';
 import { SYNC_CONFIG_INTERVAL } from '@/client/registry-client.constants';
-import { ControlPlaneRequestUtil, parseRegistryUrls, RegistryEndpoints } from '@/client/control-plane-request.util';
+import {
+  parseControlPlaneToken,
+  validateTokenCount,
+  parseRegistryUrls,
+  RegistryEndpoints,
+} from '@/client/control-plane-request.util';
 import { isSameService } from '@/util/common.util';
 import { ConfigKeys } from '@/config/keys';
-import { DEFAULT_REMOTE_TIMEOUT } from '@/constants/http.constants';
-import { ConfigSnapshotUtil } from './config-snapshot.util';
 
+import { ConfigSnapshotUtil } from './config-snapshot.util';
 
 let configEndpoints: RegistryEndpoints | undefined;
 const logger = new Logger('ConfigCenter');
@@ -111,6 +115,8 @@ export function getConfig<T>(
   }
 
   const resolvedValue = value ?? defaultValue;
+  if (key === ConfigKeys.ControlPlaneToken && resolvedValue !== undefined)
+    return parseControlPlaneToken(resolvedValue) as T;
   if (key === ConfigKeys.RegistryUrl && resolvedValue !== undefined)
     return parseRegistryUrls(resolvedValue) as T;
   return convertConfigValue(
@@ -128,7 +134,11 @@ export function validateConfig<T extends object>(
   configClass: ConfigClass<T>,
   candidate = configCenter.mainConfig,
 ) {
-  const token = getConfig<string | undefined>(ConfigKeys.ControlPlaneToken, undefined, false);
+  const token = getConfig<string | string[] | undefined>(
+    ConfigKeys.ControlPlaneToken,
+    undefined,
+    false,
+  );
   const snapshot: Record<string, any> = {
     ...candidate,
     [ConfigKeys.ControlPlaneToken]: token,
@@ -140,6 +150,7 @@ export function validateConfig<T extends object>(
   if (registryValue !== undefined)
     snapshot[ConfigKeys.RegistryUrl] = parseRegistryUrls(registryValue);
   else delete snapshot[ConfigKeys.RegistryUrl];
+  if (registryValue !== undefined) validateTokenCount(snapshot[ConfigKeys.RegistryUrl], token);
   const instance = ConfigSnapshotUtil.validate(configClass, snapshot);
   configCenter.mainConfig = ConfigSnapshotUtil.merge(snapshot, instance);
   return instance;
@@ -204,16 +215,21 @@ async function syncRemoteConfig(serviceName: string) {
     return;
   }
   const localOverrides = configCenter.devConfig;
-  const token = getConfig<string | undefined>(ConfigKeys.ControlPlaneToken, undefined, false);
-  const response = await configEndpoints.request((configUrl) =>
-    axios.get(`${configUrl}/api/config-files/client/pull`, {
-      timeout: DEFAULT_REMOTE_TIMEOUT,
-      ...ControlPlaneRequestUtil.authOptions(token),
-      params: {
-        serviceName,
-        names: names || undefined,
-      },
-    }),
+  const token = getConfig<string | string[] | undefined>(
+    ConfigKeys.ControlPlaneToken,
+    undefined,
+    false,
+  );
+  const response = await configEndpoints.request(
+    (configUrl, requestOptions) =>
+      axios.get(`${configUrl}/api/config-files/client/pull`, {
+        ...requestOptions,
+        params: {
+          serviceName,
+          names: names || undefined,
+        },
+      }),
+    token,
   );
 
   const payload = unwrapResponsePayload<RemoteConfigPayload>(response.data);
