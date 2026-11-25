@@ -27,8 +27,8 @@ export class CommonConfig {
 
   /** 允许留空以兼容未启用鉴权的控制面。 */
   @IsOptional()
-  @Matches(/^(?:[A-Za-z0-9._~+/-]+=*)?$/)
-  ControlPlaneToken?: string;
+  @Matches(/^(?:[A-Za-z0-9._~+/-]+=*)?$/, { each: true })
+  ControlPlaneToken?: string | string[];
 
   @IsOptional()
   @Matches(/^(?:[A-Za-z0-9._~+/-]{32,256})?$/)

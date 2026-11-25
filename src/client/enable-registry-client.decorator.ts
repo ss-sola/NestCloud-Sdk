@@ -25,7 +25,7 @@ export function EnableAutoRegister({ productionOnly = false } = {}) {
           undefined,
           enableAutoRegister(target),
         ),
-        controlPlaneToken: getConfig<string>(ConfigKeys.ControlPlaneToken, '', false),
+        controlPlaneToken: getConfig<string | string[]>(ConfigKeys.ControlPlaneToken, '', false),
         serviceName: getConfig<string>(ConfigKeys.ServiceName),
         metadata: getConfig<Record<string, unknown>>(ConfigKeys.ServiceMetadata, {}, false),
         heartbeatInterval: getConfig<number>(ConfigKeys.HeartbeatInterval, undefined, false),

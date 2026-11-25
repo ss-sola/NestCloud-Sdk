@@ -7,10 +7,12 @@ import { parseRegistryUrls, RegistryEndpoints } from '../../client/control-plane
 describe('RegistryUrl 节点切换', () => {
   const servers: Server[] = [];
   const hits: number[] = [];
+  const headers: Array<string | undefined> = [];
 
   async function listen(status: number) {
     const server = createServer((_req, res) => {
       hits.push(status);
+      headers.push(_req.headers.authorization);
       res.writeHead(status).end();
     });
     servers.push(server);
@@ -29,13 +31,19 @@ describe('RegistryUrl 节点切换', () => {
       ),
     );
     hits.length = 0;
+    headers.length = 0;
   });
 
   it('首节点故障后切换，后续请求沿用成功的节点', async () => {
     const urls = [await listen(503), await listen(200)];
     const endpoints = new RegistryEndpoints(parseRegistryUrls(JSON.stringify(urls)));
-    await endpoints.request((url) => axios.post(url));
-    await endpoints.request((url) => axios.get(url));
+    const tokens = ['node-a', 'node-b'];
+    await expect(
+      endpoints.request((url, options) => axios.get(url, options), ['wrong']),
+    ).rejects.toThrow('same length');
+    await endpoints.request((url, options) => axios.post(url, undefined, options), tokens);
+    await endpoints.request((url, options) => axios.get(url, options), tokens);
+    expect(headers).toEqual(['Bearer node-a', 'Bearer node-b', 'Bearer node-b']);
     expect(hits).toEqual([503, 200, 200]);
   });
 
