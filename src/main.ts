@@ -17,6 +17,7 @@ import { AfterAppBootstrapRunner } from './ext/after-application-bootstrap.runne
 import { GlobalStore } from './context/global.service';
 import { readSessionOptions } from './session/session.config';
 import { createRedisSession } from './session/redis-session';
+import { ProcessMetricsEndpoint } from './monitor/process-metrics.endpoint';
 
 export async function bootstrap(options: IOptions) {
   const logger = new AppLogger();
@@ -43,6 +44,7 @@ export async function bootstrap(options: IOptions) {
     if (globalPrefix) {
       app.setGlobalPrefix(globalPrefix);
     }
+    ProcessMetricsEndpoint.install(app, getConfig(ConfigKeys.ServiceMonitorToken, '', false));
     app.use((req: Request, res: Response, next: NextFunction) => {
       ContextService.setStore({ req, res }, next);
     });

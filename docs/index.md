@@ -4,6 +4,7 @@
 
 - [配置中心接入](./config-center/README.md)
 - [注册中心客户端](./registry-client/README.md)
+- [进程指标接口](./service-monitor/进程指标接口.md)
 - [日志能力](./logger/README.md)
 - [数据库接入](./database/README.md)
 - [Base 标准化](./base/能力总览.md)
