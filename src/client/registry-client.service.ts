@@ -15,10 +15,12 @@ import { isSameService } from '@/util/common.util';
 import { ServiceAddressUtil } from '@/util/service-address.util';
 import { enableAutoRegister } from './enable-registry-client.decorator';
 import { getOptions } from '@/config-center/options';
-import { ControlPlaneRequestUtil } from './control-plane-request.util';
+import { ControlPlaneRequestUtil, parseRegistryUrls, RegistryEndpoints } from './control-plane-request.util';
+
 
 @Injectable()
 export class RegistryClientService implements AfterApplicationBootstrap, OnModuleDestroy {
+  private readonly endpoints: RegistryEndpoints;
   private readonly logger = new Logger(RegistryClientService.name);
   private readonly requestOptions: AxiosRequestConfig;
   private readonly heartbeatInterval: number;
@@ -39,6 +41,9 @@ export class RegistryClientService implements AfterApplicationBootstrap, OnModul
     @Inject(REGISTRY_CLIENT_OPTIONS)
     private readonly options: RegistryClientOption,
   ) {
+    this.endpoints = new RegistryEndpoints(
+      options.registryUrl ? parseRegistryUrls(options.registryUrl) : [],
+    );
     this.instanceId = `${options.serviceName}-${options.serviceHost}-${options.servicePort}`;
     this.heartbeatInterval = Number(options.heartbeatInterval ?? HEARTBEAT_INTERVAL);
     this.requestOptions = {
@@ -58,7 +63,7 @@ export class RegistryClientService implements AfterApplicationBootstrap, OnModul
       this.options.serviceHost,
       this.options.servicePort,
     );
-    if (isSameService(currentUrl, this.options.registryUrl)) return;
+    if (this.endpoints.urls.some((url) => isSameService(currentUrl, url))) return;
 
     this.registrationStarted = true;
     // 注册自己
@@ -104,18 +109,20 @@ export class RegistryClientService implements AfterApplicationBootstrap, OnModul
   }
 
   private async register() {
-    await axios.post(
-      `${this.options.registryUrl}/api/registry/register`,
-      {
-        id: this.instanceId,
-        name: this.options.serviceName,
-        host: this.options.serviceHost,
-        port: this.options.servicePort,
-        baseUrl: this.options.serviceBaseUrl,
-        heartbeatInterval: this.heartbeatInterval,
-        metadata: this.options.metadata,
-      },
-      this.requestOptions,
+    await this.endpoints.request((url) =>
+      axios.post(
+        `${url}/api/registry/register`,
+        {
+          id: this.instanceId,
+          name: this.options.serviceName,
+          host: this.options.serviceHost,
+          port: this.options.servicePort,
+          baseUrl: this.options.serviceBaseUrl,
+          heartbeatInterval: this.heartbeatInterval,
+          metadata: this.options.metadata,
+        },
+        this.requestOptions,
+      ),
     );
     this.logger.log(`Registered as ${this.instanceId}`);
 
@@ -124,10 +131,12 @@ export class RegistryClientService implements AfterApplicationBootstrap, OnModul
 
   private async unregister() {
     try {
-      await axios.post(
-        `${this.options.registryUrl}/api/registry/unregister/${this.instanceId}`,
-        undefined,
-        this.requestOptions,
+      await this.endpoints.request((url) =>
+        axios.post(
+          `${url}/api/registry/unregister/${this.instanceId}`,
+          undefined,
+          this.requestOptions,
+        ),
       );
       this.logger.log(`Unregistered ${this.instanceId}`);
     } catch (err: any) {
@@ -142,10 +151,12 @@ export class RegistryClientService implements AfterApplicationBootstrap, OnModul
     if (!this.registrationStarted || this.isHeartbeating) return;
     this.isHeartbeating = true;
     try {
-      const res = await axios.post<{ success: boolean }>(
-        `${this.options.registryUrl}/api/registry/heartbeat/${this.instanceId}`,
-        undefined,
-        this.requestOptions,
+      const res = await this.endpoints.request((url) =>
+        axios.post<{ success: boolean }>(
+          `${url}/api/registry/heartbeat/${this.instanceId}`,
+          undefined,
+          this.requestOptions,
+        ),
       );
       const heartbeatResult = unwrapResponsePayload<{ success: boolean }>(res.data);
 
@@ -201,13 +212,16 @@ export class RegistryClientService implements AfterApplicationBootstrap, OnModul
 
   private async syncServices() {
     try {
-      const res = await axios.get(
-        `${this.options.registryUrl}/api/registry/all`,
-        this.requestOptions,
+      const res = await this.endpoints.request((url) =>
+        axios.get(`${url}/api/registry/all`, this.requestOptions),
       );
       const serviceMap = unwrapResponsePayload<Record<string, ServiceInstance[]>>(res.data);
-      if (!serviceMap || typeof serviceMap !== 'object' || Array.isArray(serviceMap) ||
-          !Object.values(serviceMap).every(Array.isArray)) {
+      if (
+        !serviceMap ||
+        typeof serviceMap !== 'object' ||
+        Array.isArray(serviceMap) ||
+        !Object.values(serviceMap).every(Array.isArray)
+      ) {
         throw new Error('Invalid registry service list');
       }
       if (!this.syncing) return;

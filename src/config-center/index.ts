@@ -8,12 +8,14 @@ import { getOptions } from './options';
 import { ProjectException } from '@/exception/global.exception';
 import { enableConfigCenter } from './enable-config-center.decorator';
 import { SYNC_CONFIG_INTERVAL } from '@/client/registry-client.constants';
-import { ControlPlaneRequestUtil } from '@/client/control-plane-request.util';
+import { ControlPlaneRequestUtil, parseRegistryUrls, RegistryEndpoints } from '@/client/control-plane-request.util';
 import { isSameService } from '@/util/common.util';
 import { ConfigKeys } from '@/config/keys';
 import { DEFAULT_REMOTE_TIMEOUT } from '@/constants/http.constants';
 import { ConfigSnapshotUtil } from './config-snapshot.util';
 
+
+let configEndpoints: RegistryEndpoints | undefined;
 const logger = new Logger('ConfigCenter');
 
 type ConfigCenterState = {
@@ -42,6 +44,7 @@ type ConfigValueType = 'string' | 'number' | 'boolean' | 'json';
 
 export async function initConfigCenter() {
   clearInterval(refreshTimer);
+  configEndpoints = undefined;
   configCenter.syncTime = undefined;
   configCenter.devConfig = {};
   configCenter.mainConfig = {};
@@ -108,6 +111,8 @@ export function getConfig<T>(
   }
 
   const resolvedValue = value ?? defaultValue;
+  if (key === ConfigKeys.RegistryUrl && resolvedValue !== undefined)
+    return parseRegistryUrls(resolvedValue) as T;
   return convertConfigValue(
     key,
     resolvedValue,
@@ -129,13 +134,12 @@ export function validateConfig<T extends object>(
     [ConfigKeys.ControlPlaneToken]: token,
     [ConfigKeys.ServiceMonitorToken]: getDeploymentValue(ConfigKeys.ServiceMonitorToken),
   };
-  if (token) {
-    snapshot[ConfigKeys.RegistryUrl] = getConfig<string | undefined>(
-      ConfigKeys.RegistryUrl,
-      undefined,
-      false,
-    );
-  }
+  const registryValue = token
+    ? getDeploymentValue(ConfigKeys.RegistryUrl)
+    : (candidate[ConfigKeys.RegistryUrl] ?? process.env.RegistryUrl);
+  if (registryValue !== undefined)
+    snapshot[ConfigKeys.RegistryUrl] = parseRegistryUrls(registryValue);
+  else delete snapshot[ConfigKeys.RegistryUrl];
   const instance = ConfigSnapshotUtil.validate(configClass, snapshot);
   configCenter.mainConfig = ConfigSnapshotUtil.merge(snapshot, instance);
   return instance;
@@ -181,7 +185,14 @@ export function loadConfig(filePaths?: string[]) {
 }
 
 async function syncRemoteConfig(serviceName: string) {
-  const configUrl = getConfig<string>(ConfigKeys.RegistryUrl);
+  const urls = getConfig<string[]>(ConfigKeys.RegistryUrl);
+  if (
+    !configEndpoints ||
+    configEndpoints.urls.length !== urls.length ||
+    urls.some((url, index) => configEndpoints?.urls[index] !== url)
+  ) {
+    configEndpoints = new RegistryEndpoints(urls);
+  }
   const configuredNames = getConfig<string>(ConfigKeys.ConfigNames, '', false)
     .split(',')
     .map((item) => item.trim())
@@ -194,14 +205,16 @@ async function syncRemoteConfig(serviceName: string) {
   }
   const localOverrides = configCenter.devConfig;
   const token = getConfig<string | undefined>(ConfigKeys.ControlPlaneToken, undefined, false);
-  const response = await axios.get(`${configUrl}/api/config-files/client/pull`, {
-    timeout: DEFAULT_REMOTE_TIMEOUT,
-    ...ControlPlaneRequestUtil.authOptions(token),
-    params: {
-      serviceName,
-      names: names || undefined,
-    },
-  });
+  const response = await configEndpoints.request((configUrl) =>
+    axios.get(`${configUrl}/api/config-files/client/pull`, {
+      timeout: DEFAULT_REMOTE_TIMEOUT,
+      ...ControlPlaneRequestUtil.authOptions(token),
+      params: {
+        serviceName,
+        names: names || undefined,
+      },
+    }),
+  );
 
   const payload = unwrapResponsePayload<RemoteConfigPayload>(response.data);
   if (!ConfigSnapshotUtil.isObject(payload?.mergedConfig)) {
@@ -291,12 +304,12 @@ function getValueByPath(obj: Record<string, any>, pathValue: string): unknown {
 }
 
 function shouldSkipInitialRemoteSync(): boolean {
-  const registryUrl = getConfig<string>(ConfigKeys.RegistryUrl, '', false);
-  if (!registryUrl) {
+  const urls = getConfig<string[] | undefined>(ConfigKeys.RegistryUrl, undefined, false);
+  if (!urls) {
     return false;
   }
 
   const port = getConfig<number>(ConfigKeys.Port, 0, false);
   const currentUrl = `http://127.0.0.1:${port}`;
-  return isSameService(currentUrl, registryUrl);
+  return urls.every((url) => isSameService(currentUrl, url));
 }

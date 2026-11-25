@@ -1,6 +1,6 @@
 // client/registry-client.options.ts
 export interface RegistryClient {
-  registryUrl: string; // 注册中心地址，例如 http://localhost:3000
+  registryUrl: string[] | string; // 注册中心地址，例如 http://localhost:3000
   controlPlaneToken?: string;
   serviceName?: string; // 服务名，例如 system-service
   serviceBaseUrl?: string; // 对外提供的 HTTP(S) 服务基础地址，含可选路径前缀
