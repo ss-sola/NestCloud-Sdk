@@ -49,7 +49,9 @@ describe('RegistryUrl 节点切换', () => {
 
   it('支持旧单地址，拒绝空数组与包含无效地址的数组', () => {
     expect(parseRegistryUrls('http://registry-a/')).toEqual(['http://registry-a']);
-    expect(() => parseRegistryUrls('[]')).toThrow();
-    expect(() => parseRegistryUrls(['http://registry-a', 'bad'])).toThrow();
+    expect(() => parseRegistryUrls('[]')).toThrow(
+      'RegistryUrl must contain at least one HTTP(S) origin',
+    );
+    expect(() => parseRegistryUrls(['http://registry-a', 'bad'])).toThrow('Invalid URL');
   });
 });
