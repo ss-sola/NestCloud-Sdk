@@ -52,6 +52,18 @@ describe('配置启动与热刷新', () => {
     vi.unstubAllEnvs();
   });
 
+  it('从部署配置读取按节点排列的 Token，忽略远端凭证', async () => {
+    vi.stubEnv('RegistryUrl', '["http://node-a","http://node-b"]');
+    vi.stubEnv('ControlPlaneToken', '["first","second"]');
+    mocks.readEnv.mockReturnValue(local);
+    mocks.pull.mockResolvedValue(
+      response({ BullBoardEnabled: true, ControlPlaneToken: ['remote'] }),
+    );
+    await initConfigCenter();
+    expect(mocks.pull.mock.calls[0][1].headers.Authorization).toBe('Bearer first');
+    expect(getConfig('ControlPlaneToken')).toEqual(['first', 'second']);
+  });
+
   it.each([
     ['false', false],
     ['true', true],
@@ -64,6 +76,19 @@ describe('配置启动与热刷新', () => {
     expect(getConfig('BullBoardEnabled')).toBe(expected);
     expect(getConfig('Channel')).toBe('stable');
     expect(mocks.pull).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['', 'upload.jsonc'],
+    ['shared.yaml, team.json', 'shared.yaml,team.json,upload.jsonc'],
+    ['shared.json,upload.jsonc,shared.json', 'shared.json,upload.jsonc'],
+  ])('按服务名补齐并去重配置文件 %s', async (configured, names) => {
+    mocks.readEnv.mockReturnValue(
+      local.replace('ConfigNames=upload.yaml', `ConfigNames=${configured}`),
+    );
+    mocks.pull.mockResolvedValue(response({ BullBoardEnabled: true }));
+    await initConfigCenter();
+    expect(mocks.pull.mock.calls[0][1].params).toEqual({ serviceName: 'upload', names });
   });
 
   it('本地布尔值不合法时阻止启动', async () => {
@@ -155,6 +180,6 @@ describe('配置启动与热刷新', () => {
       });
     }
     expect(getConfig('ControlPlaneToken')).toBe('deploy-token');
-    expect(getConfig('RegistryUrl')).toBe(url);
+    expect(getConfig('RegistryUrl')).toEqual([url]);
   });
 });

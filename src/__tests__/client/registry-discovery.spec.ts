@@ -8,7 +8,6 @@ import {
   DISCOVERY_CACHE_MAX_AGE_INTERVALS,
   HEARTBEAT_INTERVAL,
   MAX_REREGISTER_INTERVAL,
-  REGISTER_MAX_RETRIES,
   REGISTER_RETRY_INTERVAL,
   SYNC_INTERVAL,
 } from '../../client/registry-client.constants';
@@ -119,20 +118,22 @@ describe('服务注册与发现', () => {
     );
   });
 
-  it('首次注册重试耗尽时拒绝初始化，端口尚未监听', async () => {
-    app = await createApplication();
+  it('首次注册失败时仍完成初始化，注册中心恢复后结束后台重试', async () => {
     vi.useFakeTimers();
     vi.mocked(axios.post).mockRejectedValue(new Error('registry unavailable'));
 
-    const startup = app.init().catch((error: unknown) => error);
-    await vi.advanceTimersByTimeAsync((REGISTER_MAX_RETRIES - 1) * REGISTER_RETRY_INTERVAL);
+    await start();
+    await vi.advanceTimersByTimeAsync(5 * REGISTER_RETRY_INTERVAL);
+    expect(axios.post).toHaveBeenCalledTimes(6);
 
-    expect(await startup).toMatchObject({
-      message: `Register aborted after ${REGISTER_MAX_RETRIES} attempts: files-10.0.0.7-3300`,
-    });
-    expect(app.getHttpServer().listening).toBe(false);
-    expect(axios.post).toHaveBeenCalledTimes(REGISTER_MAX_RETRIES);
-    expect(axios.get).not.toHaveBeenCalled();
+    vi.mocked(axios.post).mockResolvedValue({ data: { success: true } });
+    await vi.advanceTimersByTimeAsync(2 * REGISTER_RETRY_INTERVAL);
+    expect(axios.post).toHaveBeenCalledTimes(7);
+    expect(axios.post).toHaveBeenLastCalledWith(
+      'http://registry.internal:3100/api/registry/register',
+      expect.any(Object),
+      expect.any(Object),
+    );
   });
 
   it('运行期丢失租约后持续退避重注册，直到恢复心跳', async () => {
@@ -235,7 +236,6 @@ describe('服务注册与发现', () => {
 
     try {
       expect(registry.getLastSyncAt()).toBeUndefined();
-      await registry.onApplicationBootstrap();
       await registry.afterApplicationBootstrap();
       expect(registry.getLastSyncAt()).toBe(Date.now());
       expect(registry.getInstances('files', { requireFresh: true })).toEqual([]);

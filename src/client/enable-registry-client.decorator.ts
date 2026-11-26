@@ -20,12 +20,12 @@ export function EnableAutoRegister({ productionOnly = false } = {}) {
     const existingImports = getModuleImports(target);
     const registryModule = RegistryClientModule.registerAsync({
       useFactory: () => ({
-        registryUrl: getConfig<string>(
+        registryUrl: getConfig<string[]>(
           ConfigKeys.RegistryUrl,
           undefined,
           enableAutoRegister(target),
         ),
-        controlPlaneToken: getConfig<string>(ConfigKeys.ControlPlaneToken, '', false),
+        controlPlaneToken: getConfig<string | string[]>(ConfigKeys.ControlPlaneToken, '', false),
         serviceName: getConfig<string>(ConfigKeys.ServiceName),
         metadata: getConfig<Record<string, unknown>>(ConfigKeys.ServiceMetadata, {}, false),
         heartbeatInterval: getConfig<number>(ConfigKeys.HeartbeatInterval, undefined, false),
