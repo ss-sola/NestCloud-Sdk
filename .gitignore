@@ -6,3 +6,4 @@ logs/
 .env
 .env.local
 *.tsbuildinfo
+/.codegraph/
