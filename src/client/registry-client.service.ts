@@ -1,11 +1,16 @@
 // client/registry-client.service.ts
-import { Inject, Injectable, Logger, OnModuleDestroy } from '@nestjs/common';
+import { HttpStatus, Inject, Injectable, Logger, OnModuleDestroy } from '@nestjs/common';
 import axios from 'axios';
+import { z } from 'zod';
 import { RegistryClientOption, ServiceInstance } from './registry-client.options';
 import {
+  DISCOVERY_CACHE_MAX_AGE_INTERVALS,
   HEARTBEAT_INTERVAL,
+  MAX_REREGISTER_INTERVAL,
+  MAX_SYNC_INTERVAL,
   REGISTER_RETRY_INTERVAL,
   REGISTRY_CLIENT_OPTIONS,
+  REREGISTER_JITTER_RATIO,
   SYNC_INTERVAL,
 } from './registry-client.constants';
 import { AfterApplicationBootstrap } from '@/ext/after-application-bootstrap.interface';
@@ -14,11 +19,43 @@ import { isSameService } from '@/util/common.util';
 import { ServiceAddressUtil } from '@/util/service-address.util';
 import { enableAutoRegister } from './enable-registry-client.decorator';
 import { getOptions } from '@/config-center/options';
+import { ProjectException } from '@/exception/global.exception';
 import {
   parseControlPlaneToken,
   parseRegistryUrls,
   RegistryEndpoints,
 } from './control-plane-request.util';
+
+const serviceMapSchema = z.record(
+  z.string(),
+  z.array(
+    z.looseObject({
+      id: z.string().min(1),
+      name: z.string().min(1),
+      host: z.string().min(1),
+      port: z.int().min(1).max(65_535),
+      lastHeartbeat: z.number(),
+      baseUrl: z
+        .string()
+        .nullish()
+        .transform((value) => value ?? undefined),
+      group: z
+        .string()
+        .nullish()
+        .transform((value) => value ?? undefined),
+      metadata: z
+        .record(z.string(), z.unknown())
+        .nullish()
+        .transform((value) => value ?? undefined),
+    }),
+  ),
+);
+const discoveryResponseSchema = z.union([
+  z
+    .object({ code: z.literal(200).optional(), data: serviceMapSchema })
+    .transform(({ data }) => data),
+  serviceMapSchema,
+]);
 
 @Injectable()
 export class RegistryClientService implements AfterApplicationBootstrap, OnModuleDestroy {
@@ -26,6 +63,8 @@ export class RegistryClientService implements AfterApplicationBootstrap, OnModul
   private readonly logger = new Logger(RegistryClientService.name);
   private readonly token?: string | string[];
   private readonly heartbeatInterval: number;
+  private readonly syncInterval: number;
+  private readonly shutdown = new AbortController();
   private instanceId: string;
   private heartbeatTimer?: NodeJS.Timeout;
   private syncTimer?: NodeJS.Timeout;
@@ -37,7 +76,7 @@ export class RegistryClientService implements AfterApplicationBootstrap, OnModul
   private isHeartbeating = false;
   private registrationStarted = false;
   private roundRobinCounter = new Map<string, number>(); // 为每个服务维护一个轮询计数
-  private cache = new Map<string, ServiceInstance[]>(); // 本地缓存
+  private cache?: { services: Map<string, ServiceInstance[]>; expiresAt: number };
 
   constructor(
     @Inject(REGISTRY_CLIENT_OPTIONS)
@@ -48,6 +87,11 @@ export class RegistryClientService implements AfterApplicationBootstrap, OnModul
     );
     this.instanceId = `${options.serviceName}-${options.serviceHost}-${options.servicePort}`;
     this.heartbeatInterval = Number(options.heartbeatInterval ?? HEARTBEAT_INTERVAL);
+    const syncInterval = Number(options.syncInterval ?? SYNC_INTERVAL);
+    this.syncInterval =
+      Number.isInteger(syncInterval) && syncInterval >= 1 && syncInterval <= MAX_SYNC_INTERVAL
+        ? syncInterval
+        : SYNC_INTERVAL;
     this.token =
       options.controlPlaneToken === undefined
         ? undefined
@@ -75,6 +119,8 @@ export class RegistryClientService implements AfterApplicationBootstrap, OnModul
   }
 
   async onModuleDestroy() {
+    if (this.shutdown.signal.aborted) return;
+    this.shutdown.abort();
     this.syncing = false;
     if (this.syncTimer) clearInterval(this.syncTimer);
     if (!this.registrationStarted) return;
@@ -87,7 +133,7 @@ export class RegistryClientService implements AfterApplicationBootstrap, OnModul
   }
 
   // === 注册中心交互 ===
-  private registerWithRetry(): Promise<void> | undefined {
+  private registerWithRetry(backoffInterval?: number): Promise<void> | undefined {
     if (!this.registrationStarted || this.registrationAttempt || this.registrationRetryTimer) {
       return this.registrationAttempt;
     }
@@ -96,13 +142,21 @@ export class RegistryClientService implements AfterApplicationBootstrap, OnModul
       .catch((error: unknown) => {
         if (!this.registrationStarted) return;
         const message = error instanceof Error ? error.message : String(error);
+        const delay = backoffInterval ?? REGISTER_RETRY_INTERVAL;
+        const jitter =
+          backoffInterval === undefined
+            ? 0
+            : Math.floor(delay * REREGISTER_JITTER_RATIO * Math.random());
+        const retryDelay = delay - jitter;
+        const nextBackoff =
+          backoffInterval === undefined ? undefined : Math.min(delay * 2, MAX_REREGISTER_INTERVAL);
         this.logger.warn(
-          `Register failed for ${this.instanceId}, retrying in ${REGISTER_RETRY_INTERVAL} ms: ${message}`,
+          `Register failed for ${this.instanceId}, retrying in ${retryDelay} ms: ${message}`,
         );
         this.registrationRetryTimer = setTimeout(() => {
           this.registrationRetryTimer = undefined;
-          void this.registerWithRetry();
-        }, REGISTER_RETRY_INTERVAL);
+          void this.registerWithRetry(nextBackoff);
+        }, retryDelay);
       })
       .finally(() => {
         this.registrationAttempt = undefined;
@@ -162,18 +216,23 @@ export class RegistryClientService implements AfterApplicationBootstrap, OnModul
           axios.post<{ success: boolean }>(
             `${url}/api/registry/heartbeat/${this.instanceId}`,
             undefined,
-            requestOptions,
+            { ...requestOptions, signal: this.shutdown.signal },
           ),
         this.token,
       );
       const heartbeatResult = unwrapResponsePayload<{ success: boolean }>(res.data);
 
-      if (!heartbeatResult.success) {
+      if (this.shutdown.signal.aborted) return;
+      if (typeof heartbeatResult?.success !== 'boolean') {
+        throw new Error('Invalid registry heartbeat response');
+      }
+      if (heartbeatResult.success === false) {
         this.stopHeartbeat();
-        await this.registerWithRetry(); // 如果心跳返回false，说明实例不存在，重新注册
+        await this.registerWithRetry(REGISTER_RETRY_INTERVAL);
       }
       this.logger.debug(`Heartbeat ${this.instanceId} ${heartbeatResult.success}`);
-    } catch (err: any) {
+    } catch (err: unknown) {
+      if (this.shutdown.signal.aborted) return;
       this.logger.error(
         `Heartbeat failed: ${err instanceof Error ? err.message : String(err)}`,
         err instanceof Error ? err.stack : undefined,
@@ -201,14 +260,11 @@ export class RegistryClientService implements AfterApplicationBootstrap, OnModul
   }
 
   private async startServiceSync() {
-    if (this.syncing) return;
+    if (this.syncing || this.shutdown.signal.aborted) return;
     this.syncing = true;
     await this.refreshServices();
     if (!this.syncing) return;
-    this.syncTimer = setInterval(
-      () => void this.refreshServices(),
-      this.options.syncInterval ?? SYNC_INTERVAL,
-    );
+    this.syncTimer = setInterval(() => void this.refreshServices(), this.syncInterval);
   }
 
   private refreshServices() {
@@ -221,29 +277,27 @@ export class RegistryClientService implements AfterApplicationBootstrap, OnModul
   private async syncServices() {
     try {
       const res = await this.endpoints.request(
-        (url, requestOptions) => axios.get(`${url}/api/registry/all`, requestOptions),
+        (url, requestOptions) =>
+          axios.get<unknown>(`${url}/api/registry/all`, {
+            ...requestOptions,
+            signal: this.shutdown.signal,
+          }),
         this.token,
       );
-      const serviceMap = unwrapResponsePayload<Record<string, ServiceInstance[]>>(res.data);
-      if (
-        !serviceMap ||
-        typeof serviceMap !== 'object' ||
-        Array.isArray(serviceMap) ||
-        !Object.values(serviceMap).every(Array.isArray)
-      ) {
+      if (!this.syncing) return;
+      const snapshot = discoveryResponseSchema.safeParse(res.data);
+      if (!snapshot.success) {
         throw new Error('Invalid registry service list');
       }
-      if (!this.syncing) return;
 
-      const newCache = new Map<string, ServiceInstance[]>();
-      for (const key in serviceMap) {
-        newCache.set(key, serviceMap[key]);
-      }
-
-      this.cache = newCache; // 只有成功时才替换
+      this.cache = {
+        services: new Map(Object.entries(snapshot.data)),
+        expiresAt: performance.now() + this.syncInterval * DISCOVERY_CACHE_MAX_AGE_INTERVALS,
+      };
       this.lastSyncAt = Date.now();
-      this.logger.debug(`服务实例已同步到本地缓存: ${JSON.stringify(serviceMap)}`);
-    } catch (err: any) {
+      this.logger.debug(`服务实例已同步到本地缓存: ${JSON.stringify(snapshot.data)}`);
+    } catch (err: unknown) {
+      if (this.shutdown.signal.aborted) return;
       this.logger.error(
         `Sync services failed: ${err instanceof Error ? err.message : String(err)}`,
         err instanceof Error ? err.stack : undefined,
@@ -252,8 +306,19 @@ export class RegistryClientService implements AfterApplicationBootstrap, OnModul
   }
 
   // === 本地服务发现 ===
-  getInstances(serviceName: string): ServiceInstance[] {
-    return this.cache.get(serviceName) ?? [];
+  getInstances(serviceName: string, { requireFresh = false } = {}): ServiceInstance[] {
+    const services = this.getFreshServices();
+    if (!services && requireFresh) {
+      throw new ProjectException('服务发现暂不可用', HttpStatus.SERVICE_UNAVAILABLE);
+    }
+    return services?.get(serviceName) ?? [];
+  }
+
+  private getFreshServices() {
+    if (this.cache && performance.now() >= this.cache.expiresAt) {
+      this.cache = undefined;
+    }
+    return this.cache?.services;
   }
 
   getLastSyncAt(): number | undefined {
@@ -264,7 +329,7 @@ export class RegistryClientService implements AfterApplicationBootstrap, OnModul
     serviceName: string;
     instances: ServiceInstance[];
   }> {
-    return [...this.cache.entries()].map(([serviceName, instances]) => ({
+    return [...(this.getFreshServices()?.entries() ?? [])].map(([serviceName, instances]) => ({
       serviceName,
       instances: [...instances],
     }));

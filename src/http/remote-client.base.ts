@@ -151,7 +151,7 @@ export class RemoteClientBase {
   getServiceUrl(serviceName: string, tried?: ReadonlySet<string>): string {
     if (!this.registryClient)
       throw new ProjectException(`未配置服务注册客户端，无法使用服务发现功能`);
-    const instances = this.registryClient.getInstances(serviceName);
+    const instances = this.registryClient.getInstances(serviceName, { requireFresh: true });
 
     if (!instances || instances.length === 0) {
       throw new RemoteException(`未发现可用的服务实例: ${serviceName}`);
