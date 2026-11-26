@@ -16,7 +16,7 @@ pnpm tsgo
 
 构建产物和类型声明位于 `dist/`。本地开发时将 `NestCloud`、`NestCloud-Sdk` 和 `SolaCloud` 放在同一目录。消费者的依赖路径相对于其 `package.json` 计算，例如 NestCloud 根包的依赖写作 `"@nest-cloud/sdk": "file:../NestCloud-Sdk"`。先在 SDK 运行 `pnpm build`，再到消费方运行 `pnpm install`，将编译产物装入消费方的依赖树。修改 SDK 后也按此顺序更新。
 
-启用 PostgreSQL 幂等写入前，从 NestCloud 仓库取得 `sql/sdk/add-rpc-idempotency-record.sql`，在接收写请求的业务数据库执行。SDK 的可选集成测试使用同一脚本。`NEST_CLOUD_TEST_POSTGRES_URL` 指向允许创建和删除测试 schema 的专用测试库。单独检出 SDK 时，通过 `NEST_CLOUD_TEST_RPC_SCHEMA_FILE` 指定该 SQL 文件的路径。详见[写请求幂等](./docs/http/写请求幂等.md)。
+写请求幂等支持 PostgreSQL 和 MySQL InnoDB。先在接收写请求的业务库执行 NestCloud 仓库中对应数据库的建表脚本。脚本路径、升级顺序和集成测试见[写请求幂等](./docs/http/写请求幂等.md)。
 
 ## 接入
 
